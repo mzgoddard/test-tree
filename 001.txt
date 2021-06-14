@@ -1,0 +1,38 @@
+render([])
+- assert no element
+
+diff(mount([]), mount([]))
+- assert empty queue
+
+render([element])
+- assert element
+
+diff(mount([]), mount([element]))
+- assert addElement in queue.changes
+
+mountState()
+elementState(mount)
+- assert ref is null
+addElement(element)
+- assert ref is dom element
+
+render([element, element])
+- assert element 1
+- assert element 2
+
+render([element, element, element])
+- assert element
+- assert element 2
+- assert element 3
+
+render([])
+- assert no element
+render([element])
+- assert element
+
+render([])
+- assert no element
+render([element, element])
+- assert element 1
+- assert element 2
+
