@@ -634,6 +634,49 @@ const g = {
     return g.then(g.test(g._string()), g._stringSlice());
   },
 
+  match(o: { [key: string]: any }) {
+    const props = Object.entries(o).map(([key, value]) =>
+      g.then(g.get(key), g.check(g.guess(value)))
+    );
+    return g.then(
+      g.object(),
+      props.reduce((next, prop) => g.then(prop, next), g.check(g.end()))
+    );
+  },
+  do(goal) {
+    return { doGoal: "doGoal", goal };
+  },
+  guess(value) {
+    if (typeof value === "object" && value) {
+      if (value.doGoal) {
+        return value.goal;
+      }
+      return g.match(value);
+    }
+    return g.isEq(value);
+  },
+  objectExpr(o: { [key: string]: any }) {
+    const props = Object.entries(o).map(([key, value]) =>
+      g.then(g.guessExpr(value), g.name(key))
+    );
+    return g.then(
+      props.reduceRight(
+        (next, prop) => g.then(prop, g.cons(next)),
+        g.nullCons()
+      ),
+      g.asObject()
+    );
+  },
+  guessExpr(value) {
+    if (typeof value === "object" && value) {
+      if (value.doGoal) {
+        return value;
+      }
+      return g.objectExpr(value);
+    }
+    return g.set(value);
+  },
+
   // value
   cons(goal) {
     return { op: "cons", goal };
@@ -842,7 +885,102 @@ class ObjectSlice extends Slice {
     )
   );
   g.grammar({
+    matchTisd: g.noop(),
+    matchThen: g.noop(),
+    matchElse: g.noop(),
+    matchCheck: g.noop(),
+    matchMutate: g.noop(),
+    matchIncrement: g.noop(),
+    matchParse: g.noop(),
+    matchCons: g.noop(),
+    matchScope: g.noop(),
+
+    match_get: g.scope(
+      { property: "property" },
+      g.match({ op: "_get", property: g.store("property") })
+    ),
+    matchGet: g.scope(
+      { property: "property" },
+      g.match(g.get(g.do(g.store("property"))))
+    ),
+    objectGet: g.scope(
+      { property: "property" },
+      g.objectExpr(
+        g.then(
+          g.objectExpr({ op: "_get", property: g.retrieve("property") }),
+          g.objectExpr(
+            g.then(
+              g.objectExpr(
+                g.check(
+                  g.objectExpr(
+                    g.then(
+                      g.objectExpr({ op: "_has" }),
+                      g.objectExpr({ op: "_test" })
+                    )
+                  )
+                )
+              ),
+              g.objectExpr({ op: "_get" })
+            )
+          )
+        )
+      )
+    ),
     first: g.test(g.then(g.object(), g.get("op"), g.isEq("first"))),
+    pullSame: (r) =>
+      g.then(
+        g.match(
+          g.else(
+            g.then(g.get(g.do(g.store("p"))), g.do(g.store("a"))),
+            g.then(g.get(g.do(g.isEq(g.retrieve("p")))), g.do(g.store("b")))
+          )
+        ),
+        g.objectExpr(
+          g.then(
+            g.get(g.do(g.retrieve("p"))),
+            g.else(g.do(g.retrieve("a")), g.do(g.retrieve("b")))
+          )
+        )
+      ),
+    pullSameProp: g.then(
+      g.match({
+        op: "else",
+        first: g.match({
+          op: "then",
+          first: g.match({ op: "get", property: g.store("p") }),
+          second: g.store("a"),
+        }),
+        second: g.match({
+          op: "then",
+          first: g.match({ op: "get", property: g.isEq(g.retrieve("p")) }),
+          second: g.store("b"),
+        }),
+      }),
+      g.objectExpr({
+        op: "then",
+        first: g.objectExpr({ op: "get", property: g.retrieve("p") }),
+        second: g.objectExpr({
+          op: "else",
+          first: g.retrieve("a"),
+          second: g.retrieve("b"),
+        }),
+      })
+      // g.expr(
+      //   g.then(g.set("then"), g.name("op")),
+      //   g.then(g.set({ op: "get", property: 0 }), g.name("first")),
+      //   g.then(
+      //     g.expr(
+      //       g.then(g.set("else"), g.name("op")),
+      //       g.then(g.retrieve("a"), g.name("first")),
+      //       g.then(g.retrieve("b"), g.name("second")),
+      //       g.nullCons()
+      //     ),
+      //     g.asObject()
+      //   ),
+      //   g.nullCons()
+      // ),
+      // g.asObject()
+    ),
     firstAElseFirstB: g.then(
       g.object(),
       g.get("op"),
@@ -850,11 +988,13 @@ class ObjectSlice extends Slice {
       g.get("first"),
       g.mutate(
         g.then(
+          // g.match({op: 'then', first: g.match({op: 'get', property: 0}), second: g.store('a')})
           g.object(),
           g.get("op"),
           g.isEq("then"),
           g.get("first"),
           g.check(
+            // g.match({op: 'get', property: 0})
             g.then(
               g.object(),
               g.get("op"),
