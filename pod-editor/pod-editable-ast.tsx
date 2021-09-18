@@ -3,9 +3,8 @@ import React, { useState } from "react";
 import { match } from "./pod-lite";
 
 import * as AST from "./pod-editor-ast";
-import { env } from "process";
 
-export function EditableAST({ value }: { value: AST.PodValue }) {
+export function PodEditableAST({ value }: { value: AST.PodValue }) {
   const { env, changePod } = useState;
 
   return match(
@@ -43,13 +42,13 @@ export function EditableAST({ value }: { value: AST.PodValue }) {
     { pod: "cons", type: AST.PodType.ATOM },
     (value: AST.PodAtom) => (
       <span onclick={() => changePod(value)}>
-        <EditableAST value={value.callee} />
+        <PodEditableAST value={value.callee} />
         <span>(</span>
         <span>...</span>
-        <EditableAST value={value.args} />
+        <PodEditableAST value={value.args} />
         <span>)</span>
         <span>,</span>
-        <EditableAST value={value.next} />
+        <PodEditableAST value={value.next} />
       </span>
     ),
     { pod: "end", type: AST.PodType.CASE },
@@ -62,12 +61,12 @@ export function EditableAST({ value }: { value: AST.PodValue }) {
     (value: AST.PodCase) => (
       <span onclick={() => changePod(value)}>
         <span>(</span>
-        <EditableAST value={value.args} />
+        <PodEditableAST value={value.args} />
         <span>)</span> <span>=&gt;</span> <span>(</span>
-        <EditableAST value={value.body} />
+        <PodEditableAST value={value.body} />
         <span>)</span>
         <span>,</span>
-        <EditableAST value={value.next} />
+        <PodEditableAST value={value.next} />
       </span>
     ),
     { pod: "end", type: AST.PodType.ARGUMENTS },
@@ -80,9 +79,9 @@ export function EditableAST({ value }: { value: AST.PodValue }) {
     (value: AST.PodArg) => (
       <span onclick={() => changePod(value)}>
         <span>(</span>
-        <EditableAST value={value.value} />
+        <PodEditableAST value={value.value} />
         <span>,</span> <span>...</span>
-        <EditableAST value={value.next} />
+        <PodEditableAST value={value.next} />
         <span>)</span>
       </span>
     ),
@@ -97,10 +96,10 @@ export function EditableAST({ value }: { value: AST.PodValue }) {
       <span onclick={() => changePod(value)}>
         <span>{"{"}</span>
         <span>[</span>
-        <EditableAST value={value.key} />
+        <PodEditableAST value={value.key} />
         <span>]</span>
-        <span>:</span> <EditableAST value={value.value} />, <span>...</span>
-        <EditableAST value={value.next} />
+        <span>:</span> <PodEditableAST value={value.value} />, <span>...</span>
+        <PodEditableAST value={value.next} />
         <span>{"}"}</span>
       </span>
     ),
@@ -114,9 +113,9 @@ export function EditableAST({ value }: { value: AST.PodValue }) {
     (value: AST.PodIndex) => (
       <span onclick={() => changePod(value)}>
         <span>[</span>
-        <EditableAST value={value.value} />
+        <PodEditableAST value={value.value} />
         <span>,</span> <span>...</span>
-        <EditableAST value={value.next} />
+        <PodEditableAST value={value.next} />
         <span>]</span>
       </span>
     ),
@@ -131,11 +130,11 @@ export function EditableAST({ value }: { value: AST.PodValue }) {
       <span onclick={() => changePod(value)}>
         <span>"</span>
         <span>{"${"}</span>
-        <EditableAST value={value.value} />
+        <PodEditableAST value={value.value} />
         <span>{"}"}</span>
         <span>{"${"}</span>
         <span>...</span>
-        <EditableAST value={value.next} />
+        <PodEditableAST value={value.next} />
         <span>{"}"}</span>
         <span>"</span>
       </span>

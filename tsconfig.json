@@ -1,6 +1,7 @@
 {
   "compilerOptions": {
     "noImplicitAny": false,
-    "target": "ES2018"
+    "target": "ES2018",
+    "jsx": "react"
   }
 }

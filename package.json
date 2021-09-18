@@ -10,5 +10,9 @@
   },
   "installConfig": {
     "pnp": true
+  },
+  "dependencies": {
+    "@yarnpkg/pnpify": "^3.0.1-rc.5",
+    "esbuild": "^0.12.28"
   }
 }

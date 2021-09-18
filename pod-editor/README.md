@@ -30,6 +30,20 @@ AST
 
 ## PodId
 
+- change type
+- set value
+
 ## PodLiteral
 
-## PodCons
+- change type
+- change value
+- delete value
+
+## PodEnd
+
+- add item
+
+## PodList
+
+- add item
+- delete item
