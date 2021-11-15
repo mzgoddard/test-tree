@@ -39,7 +39,7 @@ export function match<
 >(target: T, goal: Partial<Parameters<A>[0]>, action: A, ...more: M): any {
   if (!equal(target, goal)) {
     if (more.length > 1) {
-      return match(target, ...more);
+      return match(target, ...(more as unknown as [any, any]));
     }
     return;
   }

@@ -140,3 +140,19 @@ export interface PodCase {
   body: PodId | PodAtom | PodEnd<PodType.ATOM>;
   next: PodId | PodCase | PodEnd<PodType.CASE>;
 }
+
+export function podSet(root: PodValue, path: string[], value: PodValue) {
+  if (path.length === 0) {
+    return value;
+  }
+  const [key, ...rest] = path;
+  return { ...root, [key]: podSet(root[key], rest, value) };
+}
+
+export function podGet(root: PodValue, path: string[]) {
+  if (path.length === 0) {
+    return root;
+  }
+  const [key, ...rest] = path;
+  return podGet(root[key], rest);
+}
