@@ -1,4 +1,4 @@
-import React from "react";
+import * as React from "react";
 
 import { match } from "./pod-lite";
 
@@ -7,15 +7,15 @@ import { usePod } from "./pod-context";
 
 export function PodEditableAST({
   value,
-  parentPath: _parentPath,
-  pathKey,
+  parentPath: _parentPath = [],
+  pathKey = "",
 }: {
   value: AST.PodValue;
-  parentPath: string[];
-  pathKey: string;
+  parentPath?: string[];
+  pathKey?: string;
 }) {
   const { changePod } = usePod();
-  const parentPath = [..._parentPath, pathKey];
+  const parentPath = pathKey ? [..._parentPath, pathKey] : _parentPath;
 
   return match(
     value,

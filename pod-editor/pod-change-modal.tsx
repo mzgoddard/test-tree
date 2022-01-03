@@ -1,4 +1,5 @@
 import * as React from "react";
+import { usePod } from "./pod-context";
 
 import {
   PodArg,
@@ -27,7 +28,14 @@ import { match } from "./pod-lite";
 //   - rename
 //   - merge
 //   - duplicate
-export const PodChangeModal = ({ value }: { value: PodValue }) => {
+export const PodChangeModal = ({
+  path,
+  value,
+}: {
+  path: string[];
+  value: PodValue;
+}) => {
+  const { savePod, cancelChangePod } = usePod();
   return (
     <div>
       {match(
@@ -156,7 +164,20 @@ export const PodChangeModal = ({ value }: { value: PodValue }) => {
             { type: PodType.CASE },
             () => (
               <div>
-                <button>Add Case</button>
+                <button
+                  onClick={() =>
+                    savePod(path, {
+                      id: -1,
+                      pod: "cons",
+                      type: PodType.CASE,
+                      args: { id: -1, pod: "end", type: PodType.ARGUMENTS },
+                      body: { id: -1, pod: "end", type: PodType.ATOM },
+                      next: value,
+                    })
+                  }
+                >
+                  Add Case
+                </button>
               </div>
             ),
             { type: PodType.ATOM },
@@ -169,7 +190,7 @@ export const PodChangeModal = ({ value }: { value: PodValue }) => {
       )}
       <div>
         <button>Save</button>
-        <button>Cancel</button>
+        <button onClick={cancelChangePod}>Cancel</button>
       </div>
     </div>
   );

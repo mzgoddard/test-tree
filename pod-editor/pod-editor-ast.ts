@@ -156,3 +156,87 @@ export function podGet(root: PodValue, path: string[]) {
   const [key, ...rest] = path;
   return podGet(root[key], rest);
 }
+
+export function boolean(value: boolean): PodBoolean {
+  return { id: -1, pod: "literal", type: PodType.BOOLEAN, value };
+}
+
+export function number(value: number): PodNumber {
+  return { id: -1, pod: "literal", type: PodType.NUMBER, value };
+}
+
+export function string(value: string): PodString {
+  return { id: -1, pod: "literal", type: PodType.STRING, value };
+}
+
+export function branch(
+  args: PodValue[],
+  body: PodAtom[] = [],
+  next: PodCase | PodEnd<PodType.CASE>
+): PodCase | PodEnd<PodType.CASE> {}
+
+export function atom(
+  callee: PodId | PodCase,
+  _args: PodValue[],
+  next: PodAtom | PodEnd<PodType.ATOM> = {
+    id: -1,
+    pod: "end",
+    type: PodType.ATOM,
+  }
+): PodAtom | PodEnd<PodType.ATOM> {
+  return {
+    id: -1,
+    pod: "cons",
+    type: PodType.ATOM,
+    callee,
+    args: args(..._args),
+    next,
+  };
+}
+
+export function object(
+  ...entries: [PodId | PodString, PodValue][]
+): PodProperty | PodEnd<PodType.OBJECT> {
+  if (entries.length > 0) {
+    const [[key, value], ...rest] = entries;
+    return {
+      id: -1,
+      pod: "cons",
+      type: PodType.OBJECT,
+      key,
+      value,
+      next: object(...rest),
+    };
+  }
+  return { id: -1, pod: "end", type: PodType.OBJECT };
+}
+
+export function array(
+  ...entries: PodValue[]
+): PodIndex | PodEnd<PodType.ARRAY> {
+  if (entries.length > 0) {
+    const [value, ...rest] = entries;
+    return {
+      id: -1,
+      pod: "cons",
+      type: PodType.ARRAY,
+      value,
+      next: array(...rest),
+    };
+  }
+  return { id: -1, pod: "end", type: PodType.ARRAY };
+}
+
+export function args(..._args: PodValue[]): PodArg | PodEnd<PodType.ARGUMENTS> {
+  if (_args.length > 0) {
+    const [value, ...rest] = _args;
+    return {
+      id: -1,
+      pod: "cons",
+      type: PodType.ARGUMENTS,
+      value,
+      next: args(...rest),
+    };
+  }
+  return { id: -1, pod: "end", type: PodType.ARGUMENTS };
+}

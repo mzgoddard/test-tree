@@ -1,4 +1,5 @@
 import * as React from "react";
+import { PodChangeModal } from "./pod-change-modal";
 import { PodNull, podSet, PodType, PodValue } from "./pod-editor-ast";
 
 const { useContext, createContext } = React;
@@ -21,7 +22,7 @@ export const usePod = () => {
   return useContext(PodContext);
 };
 
-export const Provider = ({ getModule, save }) => {
+export const Provider = ({ getModule, save, children }) => {
   const [state, reduce] = React.useReducer(reducer, undefined, () => ({
     ...getModule(),
     modal: [],
@@ -46,7 +47,24 @@ export const Provider = ({ getModule, save }) => {
           reduce({ type: PodActionType.CHANGE_MODAL_CANCEL });
         },
       }}
-    ></P>
+    >
+      {children}
+      {state.modal.length ? (
+        <div>
+          {state.modal.map((modal, index) =>
+            modal.view === PodModalView.CHANGE ? (
+              <PodChangeModal
+                key={index}
+                path={modal.path}
+                value={modal.value}
+              ></PodChangeModal>
+            ) : null
+          )}
+        </div>
+      ) : (
+        <React.Fragment></React.Fragment>
+      )}
+    </P>
   );
 };
 
@@ -125,6 +143,9 @@ interface PodState {
 function reducer(state: PodState, action: PodAction): PodState {
   switch (action.type) {
     case PodActionType.CHANGE_MODAL_OPEN:
+      if (state.modal.find(({ view }) => view === PodModalView.CHANGE)) {
+        return state;
+      }
       return {
         ...state,
         modal: [
@@ -137,6 +158,7 @@ function reducer(state: PodState, action: PodAction): PodState {
       state.save({ names: state.names, root });
       return {
         ...state,
+        root,
         modal: state.modal.slice(0, state.modal.length - 1),
       };
     case PodActionType.CHANGE_MODAL_RENAME:
