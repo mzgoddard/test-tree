@@ -51,6 +51,12 @@
       return this;
     }
     *test(statement) {}
+    *call(statement) {
+      const scope = new MatchMap();
+      for (const _ of _call(viewOf(scope, statement), this)) {
+        yield scope;
+      }
+    }
   }
 
   interface Match {
@@ -334,7 +340,11 @@
       return viewOf(this.match, this.target[this.keys.first() as string]);
     }
     rest() {
-      return new ObjectView(this.match, this.target, this.keys.rest());
+      return new ObjectView(
+        this.match,
+        this.target,
+        this.keys.rest() as ArrayView<string>
+      );
     }
   }
 
@@ -493,28 +503,15 @@
           if (rightFormula instanceof ArgView) {
             rightFormula = rightFormula.get();
           }
-          if (
-            leftFormula instanceof ArrayView &&
+          const leftValue =
+            leftFormula instanceof ArrayView
+              ? calc(serialize(leftFormula))
+              : leftFormula;
+          const rightValue =
             rightFormula instanceof ArrayView
-          ) {
-            if (
-              calc(serialize(leftFormula)) === calc(serialize(rightFormula))
-            ) {
-              yield true;
-            }
-          } else if (leftFormula instanceof ArgView) {
-            if (rightFormula instanceof ArrayView) {
-              yield* _unify(leftFormula, calc(serialize(rightFormula)));
-            } else {
-              yield* _unify(leftFormula, rightFormula);
-            }
-          } else if (rightFormula instanceof ArgView) {
-            if (leftFormula instanceof ArrayView) {
-              yield* _unify(rightFormula, calc(serialize(leftFormula)));
-            } else {
-              yield* _unify(rightFormula, leftFormula);
-            }
-          }
+              ? calc(serialize(rightFormula))
+              : rightFormula;
+          yield* _unify(leftValue, rightValue);
         }
       },
     ],
@@ -600,5 +597,64 @@
         : process.hrtime()) as any) - (start as any)
       // Date.now() - startMs
     );
+    for (const _ of new Facts()
+      .add(
+        ["get", [_0, ..._1], _2, _3],
+        [
+          ";",
+          [",", ["is", _2, 0], ["=", _3, _0]],
+          [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
+        ]
+      )
+      .call([",", ["get", [1, 2, 3, 4], ..._0], ["log", _0]])) {
+    }
+    for (const _ of new Facts()
+      .add(
+        ["get", [_0, ..._1], _2, _3],
+        [
+          ";",
+          [",", ["is", _2, 0], ["=", _3, _0]],
+          [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
+        ]
+      )
+      .call([",", ["get", [1, 2, 3, 4], _0, 2], ["log", _0]])) {
+    }
+    for (const _ of new Facts()
+      .add(
+        ["get", [_0, ..._1], _2, _3],
+        [
+          ";",
+          [",", ["is", _2, 0], ["=", _3, _0]],
+          [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
+        ]
+      )
+      .call([",", ["get", [1, 2, 3, 4], 2, _0], ["log", _0]])) {
+    }
+    // [
+    //   _2,
+    //   "is",
+    //   0,
+    //   ",",
+    //   _3,
+    //   "=",
+    //   _0,
+    //   ";",
+    //   ["get", _1, _4, _3],
+    //   ",",
+    //   [_2, "is", _4, "+", 1],
+    // ];
+    // [
+    //   ["rewrite", _0, _0],
+    //   [",", ["=", [_1, ..._2], _0], [",", ["isString", _1], ["cut"]]],
+    // ];
+    // [
+    //   ["rewrite", [_0, _1, ",", ..._2], _3],
+    //   [",", ["rewrite", []]],
+    // ];
+    // [["rewrite", [_0, "is", _1], ["is", _0, _1]]];
+    // [["rewrite", [_0, ",", _1], [",", _0, _1]]];
+    // [["rewrite", [_0, "is", _1], ["is", _0, _1]]];
+    // [["rewrite", [_0, "=", _1], ["=", _0, _1]]];
+    // [["rewrite", _0, _0]];
   }
 }
