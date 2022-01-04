@@ -51,9 +51,9 @@
       return this;
     }
     *test(statement) {}
-    *call(statement) {
+    *call(statement: [string, ...Expr[]]) {
       const scope = new MatchMap();
-      for (const _ of _call(viewOf(scope, statement), this)) {
+      for (const _ of _call(new ArrayView(scope, statement, 0), this)) {
         yield scope;
       }
     }
@@ -61,39 +61,12 @@
 
   interface Match {
     has(arg: Arg): boolean;
-    get(arg: Arg): any;
+    get(arg: Arg): View;
   }
 
   interface MatchSet extends Match {
-    set(arg: Arg, value: any): this;
+    set(arg: Arg, value: View): this;
     delete(arg: Arg): this;
-  }
-
-  class MatchEmpty implements Match {
-    has(arg: Arg) {
-      return false;
-    }
-    get(arg: Arg) {
-      return undefined;
-    }
-  }
-
-  const empty = new MatchEmpty();
-
-  class MatchChain implements Match {
-    constructor(private left: Match, private right: Match) {}
-    has(arg: Arg) {
-      return this.left.has(arg) || this.right.has(arg);
-    }
-    get(arg: Arg) {
-      if (!this.has(arg)) {
-        return new ArgView(this as unknown as MatchSet, arg);
-      }
-      if (this.left.has(arg)) {
-        return this.left.get(arg);
-      }
-      return this.right.get(arg);
-    }
   }
 
   class MatchMap implements MatchSet {
@@ -108,7 +81,7 @@
       }
       return this.map.get(arg);
     }
-    set(arg: Arg, value: undefined) {
+    set(arg: Arg, value: View) {
       this.map.set(arg, value);
       return this;
     }
@@ -118,46 +91,6 @@
     }
   }
 
-  type TypeOfExpr<T extends Expr | View> = T extends undefined
-    ? "undefined"
-    : T extends null
-    ? "null"
-    : T extends number
-    ? "number"
-    : T extends string
-    ? "string"
-    : T extends symbol
-    ? "symbol"
-    : T extends Arg
-    ? "arg"
-    : T extends RestArg
-    ? "restArg"
-    : T extends any[]
-    ? "array"
-    : T extends View
-    ? "view"
-    : T extends { [key: string]: any }
-    ? "object"
-    : never;
-
-  function _typeOf<T extends Expr | View>(value: T): TypeOfExpr<T>;
-  function _typeOf(value: Expr) {
-    if (typeof value === "object") {
-      if (value === null) {
-        return "null";
-      } else if (Array.isArray(value)) {
-        return "array";
-      } else if (value instanceof Arg) {
-        return "arg";
-      } else if (value instanceof RestArg) {
-        return "restArg";
-      } else if (value instanceof View) {
-        return "view";
-      }
-      return "object";
-    }
-    return typeof value;
-  }
   type ViewOf<T extends Expr | View> = T extends Arg
     ? ArgView
     : T extends (infer R)[]
@@ -168,31 +101,33 @@
     ? R extends Expr
       ? ObjectView<R>
       : ObjectView<Expr>
-    : T;
+    : T extends Immutable
+    ? ImmutableView<T>
+    : never;
+
   function viewOf<T extends Expr | View>(match: MatchSet, target: T): ViewOf<T>;
   function viewOf(match: MatchSet, target: Expr | View) {
-    switch (_typeOf(target)) {
-      case "array":
-        return new ArrayView(match, target as Expr[], 0);
-      case "object":
-        return new ObjectView(
-          match,
-          target as { [key in string | symbol]: Expr }
-        );
-      case "arg":
-        return new ArgView(match, target as Arg).get();
-      case "view":
-        return target as unknown as View;
-      default:
-        return target as Immutable;
+    if (target instanceof View) {
+      return target;
+    } else if (typeof target === "object") {
+      if (target === null) {
+        return new ImmutableView(match, target as null);
+      } else if (Array.isArray(target)) {
+        return new ArrayView(match, target, 0);
+      } else if (target instanceof Arg) {
+        return new ArgView(match, target);
+      } else {
+        return new ObjectView(match, target);
+      }
+    } else {
+      return new ImmutableView(match, target);
     }
   }
-  function serialize(value: Immutable | View) {
-    if (value instanceof View) {
-      return value.serialize();
-    }
-    return value;
+
+  function serialize(value: View) {
+    return value.serialize();
   }
+
   abstract class View {
     match: MatchSet;
     isArg(): this is ArgView {
@@ -207,6 +142,7 @@
     isImmutable(): this is ImmutableView<any> {
       return false;
     }
+    abstract isSame(other: View): boolean;
     abstract serialize(): any;
   }
   class ArgView extends View {
@@ -216,37 +152,35 @@
     isArg(): this is ArgView {
       return true;
     }
+    isSame(other: View) {
+      return (
+        other.isArg() &&
+        other.match === this.match &&
+        other.target === this.target
+      );
+    }
     serialize() {
       const value = this.get();
-      if (value instanceof View) {
-        if (value.isArg()) {
-          return value.target;
-        }
-        return value.serialize();
+      if (value.isArg()) {
+        return value.target;
       }
-      return value;
+      return value.serialize();
     }
     bound() {
       return this.match.has(this.target);
     }
-    get(): Immutable | View {
+    get(): View {
       if (!this.match.has(this.target)) {
         return this;
       }
-      const value = this.match.get(this.target) as Immutable | View;
-      if (value === this) {
-        throw new Error("Cannot evaluate to self.");
-      } else if (value instanceof ArgView) {
+      const value = this.match.get(this.target) as View;
+      if (value.isArg()) {
         return value.get();
       }
       return value;
     }
-    set(value: Immutable | View) {
-      if (
-        value instanceof ArgView &&
-        value.match === this.match &&
-        value.target === this.target
-      ) {
+    set(value: View) {
+      if (value.isSame(this)) {
         throw new Error("Cannot evaluate to self.");
       }
       this.match.set(this.target, value);
@@ -254,7 +188,7 @@
     delete() {
       this.match.delete(this.target);
     }
-    *guard(value: Immutable | View) {
+    *guard(value: View) {
       this.set(value);
       try {
         yield this.match;
@@ -275,16 +209,20 @@
     isArray(): this is ArrayView<Expr> {
       return true;
     }
+    isSame(other: View) {
+      return (
+        other.isArray() &&
+        other.match === this.match &&
+        other.target === this.target &&
+        other.start === this.start
+      );
+    }
     serialize() {
       return this.target.slice(this.start).map((entry) => {
         if (entry instanceof RestArg) {
           return new ArgView(this.match, entry.arg).serialize();
         }
-        const view = viewOf(this.match, entry as Expr);
-        if (view instanceof View) {
-          return view.serialize();
-        }
-        return view;
+        return viewOf(this.match, entry as Expr).serialize();
       });
     }
     empty() {
@@ -296,10 +234,10 @@
     more() {
       return this.target[this.start] instanceof RestArg;
     }
-    first() {
+    first(): View {
       return viewOf(this.match, this.target[this.start] as Expr);
     }
-    rest() {
+    rest(): View {
       if (this.target[this.start] instanceof RestArg) {
         return new ArgView(
           this.match,
@@ -314,6 +252,7 @@
       return new ArrayView(this.match, this.target, this.start + 1);
     }
   }
+
   class ObjectView<V extends Expr> extends View {
     constructor(
       public match: MatchSet,
@@ -325,19 +264,23 @@
     isObject(): this is ObjectView<Expr> {
       return true;
     }
+    isSame(other: View) {
+      return (
+        other.isObject() &&
+        other.match === this.match &&
+        other.target === this.target &&
+        (other.keys.isSame(this.keys) ||
+          other.keys.target.every((key, index) => key === this.keys[index]))
+      );
+    }
     serialize() {
       return this.keys.target.slice(this.keys.start).reduce((carry, key) => {
-        const view = viewOf(this.match, this.target[key]);
-        if (view instanceof View) {
-          carry[key] = view.serialize();
-        } else {
-          carry[key] = view;
-        }
+        carry[key] = viewOf(this.match, this.target[key]).serialize();
         return carry;
       }, {});
     }
     first() {
-      return viewOf(this.match, this.target[this.keys.first() as string]);
+      return viewOf(this.match, this.target[this.keys.first().serialize()]);
     }
     rest() {
       return new ObjectView(
@@ -355,63 +298,50 @@
     isImmutable() {
       return true;
     }
+    isSame(other: View) {
+      return other.isImmutable() && other.value === this.value;
+    }
     serialize() {
       return this.value;
     }
   }
 
-  function* _unify<S extends Immutable | View, T extends Immutable | View>(
-    left: S,
-    right: T
-  ) {
-    if ((left as Immutable | View) === (right as Immutable | View)) {
+  function* _unify<S extends View, T extends View>(left: S, right: T) {
+    if (left.isSame(right)) {
       yield true;
-    }
-    if (left instanceof View) {
-      if (left.isArg()) {
-        if (left.bound()) {
-          yield* _unify(left.get(), right);
-        } else if (
-          right instanceof ArgView &&
-          left.target === right.target &&
-          left.match === right.match
-        ) {
-          yield true;
-        } else {
-          for (const _ of left.guard(right)) {
-            yield true;
-          }
-        }
-      } else if (right instanceof ArgView) {
-        for (const _ of _unify(right, left)) {
+    } else if (left.isArg()) {
+      if (left.bound()) {
+        yield* _unify(left.get(), right);
+      } else {
+        for (const _ of left.guard(right)) {
           yield true;
         }
-      } else if (left.isArray() && right instanceof ArrayView) {
-        if (!left.empty() && !right.empty()) {
+      }
+    } else if (right.isArg()) {
+      for (const _ of _unify(right, left)) {
+        yield true;
+      }
+    } else if (left.isArray() && right.isArray()) {
+      if (!left.empty() && !right.empty()) {
+        for (const _ of _unify(left.first(), right.first())) {
+          yield* _unify(left.rest(), right.rest());
+        }
+      } else if (left.empty() && left.more()) {
+        yield* _unify(left.rest(), right);
+      } else if (right.empty() && right.more()) {
+        yield* _unify(left, right.rest());
+      } else if (left.empty() && right.empty()) {
+        yield true;
+      }
+    } else if (left.isObject() && right.isObject()) {
+      if (left.keys.empty() && right.keys.empty()) {
+        yield true;
+      } else if (!left.keys.empty() && !right.keys.empty()) {
+        if (left.keys.first() === right.keys.first()) {
           for (const _ of _unify(left.first(), right.first())) {
             yield* _unify(left.rest(), right.rest());
           }
-        } else if (left.empty() && left.more()) {
-          yield* _unify(left.rest(), right);
-        } else if (right.empty() && right.more()) {
-          yield* _unify(left, right.rest());
-        } else if (left.empty() && right.empty()) {
-          yield true;
         }
-      } else if (left.isObject() && right instanceof ObjectView) {
-        if (left.keys.empty() && right.keys.empty()) {
-          yield true;
-        } else if (!left.keys.empty() && !right.keys.empty()) {
-          if (left.keys.first() === right.keys.first()) {
-            for (const _ of _unify(left.first(), right.first())) {
-              yield* _unify(left.rest(), right.rest());
-            }
-          }
-        }
-      }
-    } else if (right instanceof View) {
-      for (const _ of _unify(right, left)) {
-        yield true;
       }
     }
   }
@@ -439,85 +369,59 @@
     }
   }
 
-  const [params] = args();
+  const [params, left, right] = args();
   const llOps: [
     (Expr | RestArg)[],
     (statement: ArrayView, facts: Facts) => Generator<boolean>
   ][] = [
     [
-      [",", ...params],
+      [",", left, right],
       function* _comma(statement, facts) {
         const scope = statement.match;
-        const [left, right] = args();
-        for (const _ of _unify(
-          viewOf(scope, [left, right]),
-          viewOf(scope, params)
-        )) {
-          for (const _ of _call(scope.get(left), facts)) {
-            yield* _call(scope.get(right), facts);
-          }
+        for (const _ of _call(scope.get(left) as ArrayView<any>, facts)) {
+          yield* _call(scope.get(right) as ArrayView<any>, facts);
         }
       },
     ],
     [
-      [";", ...params],
+      [";", left, right],
       function* _comma(statement, facts) {
         const scope = statement.match;
-        const [left, right] = args();
-        for (const _ of _unify(
-          viewOf(scope, [left, right]),
-          viewOf(scope, params)
-        )) {
-          yield* _call(scope.get(left), facts);
-          yield* _call(scope.get(right), facts);
-        }
+        yield* _call(scope.get(left) as ArrayView<any>, facts);
+        yield* _call(scope.get(right) as ArrayView<any>, facts);
       },
     ],
     [
-      ["=", ...params],
+      ["=", left, right],
       function* _assign(statement, facts) {
         const scope = statement.match;
-        const [left, right] = args();
-        for (const _ of _unify(
-          viewOf(scope, [left, right]),
-          viewOf(scope, params)
-        )) {
-          yield* _unify(viewOf(scope, left), viewOf(scope, right));
-        }
+        yield* _unify(scope.get(left), scope.get(right));
       },
     ],
     [
-      ["is", ...params],
+      ["is", left, right],
       function* _settle(statement, facts) {
         const scope = statement.match;
-        const [left, right] = args();
-        for (const _ of _unify(
-          viewOf(scope, [left, right]),
-          viewOf(scope, params)
-        )) {
-          let leftFormula = scope.get(left);
-          if (leftFormula instanceof ArgView) {
-            leftFormula = leftFormula.get();
-          }
-          let rightFormula = scope.get(right);
-          if (rightFormula instanceof ArgView) {
-            rightFormula = rightFormula.get();
-          }
-          const leftValue =
-            leftFormula instanceof ArrayView
-              ? calc(serialize(leftFormula))
-              : leftFormula;
-          const rightValue =
-            rightFormula instanceof ArrayView
-              ? calc(serialize(rightFormula))
-              : rightFormula;
-          yield* _unify(leftValue, rightValue);
+        let leftFormula = scope.get(left);
+        if (leftFormula.isArg()) {
+          leftFormula = leftFormula.get();
         }
+        let rightFormula = scope.get(right);
+        if (rightFormula.isArg()) {
+          rightFormula = rightFormula.get();
+        }
+        const leftValue = leftFormula.isArray()
+          ? new ImmutableView(leftFormula.match, calc(serialize(leftFormula)))
+          : leftFormula;
+        const rightValue = rightFormula.isArray()
+          ? new ImmutableView(rightFormula.match, calc(serialize(rightFormula)))
+          : rightFormula;
+        yield* _unify(leftValue, rightValue);
       },
     ],
     [
       ["true", ...params],
-      function* _true(statement, facts) {
+      function* _true() {
         yield true;
       },
     ],
@@ -530,8 +434,8 @@
     ],
     [
       ["log", ...params],
-      function* _log(statement, facts) {
-        console.log(...serialize(viewOf(statement.match, params)));
+      function* _log(statement) {
+        console.log(...serialize(statement.match.get(params)));
         yield true;
       },
     ],
@@ -540,16 +444,20 @@
   function* _call(statement: ArrayView, facts: Facts) {
     const scope = new MatchMap();
     for (const [llOp, llAction] of llOps) {
-      for (const _ of _unify(viewOf(scope, llOp), statement)) {
-        yield* llAction(viewOf(scope, llOp), facts);
+      const llOpView = new ArrayView(scope, llOp, 0);
+      for (const _ of _unify(llOpView, statement)) {
+        yield* llAction(llOpView, facts);
         return;
       }
     }
 
     try {
       for (const fact of facts.facts) {
-        for (const _ of _unify(viewOf(scope, fact.statement), statement)) {
-          yield* _call(viewOf(scope, fact.condition), facts);
+        for (const _ of _unify(
+          new ArrayView(scope, fact.statement, 0),
+          statement
+        )) {
+          yield* _call(new ArrayView(scope, fact.condition, 0), facts);
         }
       }
     } catch (err) {
@@ -580,7 +488,18 @@
       : process.hrtime();
     // const startMs = Date.now();
     for (const _ of _call(
-      viewOf(m, [",", ["get", [1, 2, 3, 4], ..._0], ["true"]]),
+      viewOf(m, [
+        ",",
+        [
+          "get",
+          [
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+            20,
+          ],
+          ..._0,
+        ],
+        ["true"],
+      ]),
       new Facts().add(
         ["get", [_0, ..._1], _2, _3],
         [
