@@ -603,20 +603,16 @@
       if (other.isArg()) {
         yield* other.unify(this);
       } else if (this.isSame(other)) {
-        if (other.isObject() && other.more()) {
-          yield* this.unify(other.rest());
-        } else {
-          yield true;
-        }
+        yield true;
       } else if (other.isObject()) {
         if (!this.empty() && !other.empty()) {
-          for (const _ of this.first().unify(other)) {
-            yield* this.rest().unify(other);
+          const thisKey = this.firstKey();
+          const otherKey = other.firstKey();
+          if (thisKey === otherKey) {
+            for (const _ of this.firstValue().unify(other.firstValue())) {
+              yield* this.rest().unify(other.rest());
+            }
           }
-        } else if (this.empty() && this.more()) {
-          yield* this.rest().unify(other);
-        } else if (other.empty() && other.more()) {
-          yield* this.unify(other.rest());
         } else if (this.empty() && other.empty()) {
           yield true;
         }
@@ -626,7 +622,8 @@
       return this.keys.target.length === this.keys.start;
     }
     more() {
-      return this.target[objectRestKeySymbol] instanceof Arg;
+      return false;
+      // return this.target[objectRestKeySymbol] instanceof Arg;
     }
     firstKey(): string {
       return this.keys.first().serialize();
@@ -634,218 +631,19 @@
     firstValue() {
       return ViewFactory.view(this.match, this.target[this.firstKey()]);
     }
-    first() {
-      return new ObjectKeyView(this.match, this.target, this.firstKey());
-    }
+    // first() {
+    //   return new ObjectKeyView(this.match, this.target, this.firstKey());
+    // }
     rest() {
-      if (this.empty() && this.more()) {
-        return new ObjectRestView(this.match, this.target).rest();
-      }
+      // if (this.empty() && this.more()) {
+      //   return new ObjectRestView(this.match, this.target).rest();
+      // }
       return new ObjectView(this.match, this.target, this.keys.rest());
     }
   }
 
   const EMPTY_ARRAY_VIEW = new ArrayView(null, [], 0);
   const EMPTY_OBJECT_VIEW = new ObjectView(null, {}, EMPTY_ARRAY_VIEW);
-
-  class ObjectRestView<V extends Expr> extends ObjectView<V> {
-    constructor(match: MatchSet, target: ObjectExpr) {
-      super(match, target, EMPTY_ARRAY_VIEW);
-    }
-    empty() {
-      return true;
-    }
-    more() {
-      return this.match.has(this.target[objectRestKeySymbol]);
-    }
-    rest() {
-      if (this.more()) {
-        return new ArgView(this.match, this.target[objectRestKeySymbol]).get();
-      }
-      return this;
-    }
-    *unify(other: View) {
-      if (other.isArg()) {
-        yield* other.unify(this);
-      } else if (this.isSame(other)) {
-        if (other.isObject() && other.more()) {
-          yield* this.unify(other.rest());
-        } else {
-          yield true;
-        }
-      } else if (other.isObject()) {
-        if (this.more()) {
-          yield* this.rest().unify(other);
-        } else if (other.empty()) {
-          if (other.more()) {
-            yield* this.unify(other.rest());
-          } else {
-            yield true;
-          }
-        } else if (other instanceof ObjectKeyView) {
-          yield* new ArgView(
-            this.match,
-            this.target[objectRestKeySymbol]
-          ).guard(other);
-        } else {
-          yield* this.unifyOther(other);
-        }
-      }
-    }
-
-    private *unifyOther(other: ObjectView<any>) {
-      if (this.isSame(other)) {
-        if (other.more()) {
-          yield* this.unifyOther(other.rest());
-        } else {
-          yield true;
-        }
-      } else if (!other.empty()) {
-        for (const _ of other
-          .first()
-          .unify(new ObjectView(this.match, this.target))) {
-          yield* this.unifyOther(other.rest());
-        }
-      } else if (other.more()) {
-        yield* this.unifyOther(other.rest());
-      } else {
-        yield true;
-      }
-    }
-  }
-
-  class ObjectKeyView<V extends Expr> extends ObjectView<V> {
-    linkView: ObjectView<V> = null;
-    constructor(match: MatchSet, target: ObjectExpr, public key: string) {
-      super(match, target, EMPTY_ARRAY_VIEW);
-    }
-    firstKey() {
-      return this.key;
-    }
-    firstValue() {
-      return viewOf(this.match, this.target[this.key]);
-    }
-    first() {
-      return this;
-    }
-    empty() {
-      return false;
-    }
-    more() {
-      return this.linkView !== null;
-    }
-    rest() {
-      if (this.linkView === null) {
-        return this;
-      }
-      return this.linkView.rest();
-    }
-    *unify(other: View) {
-      if (other.isArg()) {
-        if (other.bound()) {
-          yield* this.unify(other.get());
-        } else {
-          // this.restView = new ObjectRestView(other.match, other.target);
-          // try {
-          //   yield* other.guard(this);
-          // } finally {
-          //   this.restView = null;
-          // }
-        }
-      } else if (this.isSame(other)) {
-        if (other.isObject()) {
-          if (other.more()) {
-            yield* this.unify(other.rest());
-          } else {
-            yield true;
-          }
-        }
-      } else if (other.isObject()) {
-        if (!other.empty()) {
-          if (this.key === other.firstKey()) {
-            yield* this.firstValue().unify(other.firstValue());
-          } else {
-            yield* this.unify(other.rest());
-          }
-        } else if (other instanceof ObjectRestView) {
-          this.linkView = new ObjectLinkView(other.match, other.target);
-          try {
-            yield* other.unify(this);
-          } finally {
-            this.linkView = null;
-          }
-        } else if (other instanceof ObjectLinkView) {
-          this.linkView = new ObjectLinkView(other.match, other.target);
-          try {
-            other.restMatch = this;
-            yield true;
-          } finally {
-            other.restMatch = null;
-            this.linkView = null;
-          }
-        } else if (other.more()) {
-          yield* this.unify(other.rest());
-        }
-      }
-    }
-    private *unifyRest(other: ObjectView<any>) {
-      const otherRest = other.rest();
-      if (otherRest.isArg()) {
-        this.linkView = new ObjectLinkView(other.match, other.target);
-        try {
-          yield* otherRest.guard(this);
-        } finally {
-          this.linkView = null;
-        }
-      } else {
-        yield* this.unify(otherRest);
-      }
-    }
-  }
-
-  class ObjectLinkView<V extends Expr> extends ObjectView<V> {
-    constructor(
-      match: MatchSet,
-      target: ObjectExpr,
-      public restMatch: ObjectView<V> = null
-    ) {
-      super(match, target, EMPTY_ARRAY_VIEW);
-    }
-    empty() {
-      return true;
-    }
-    more() {
-      return this.restMatch !== null;
-    }
-    rest() {
-      if (this.restMatch === null) {
-        return this;
-      }
-      return this.restMatch;
-    }
-    *unify(other: View) {
-      if (this.restMatch === null) {
-        if (other.isArg()) {
-          yield* other.unify(this);
-        } else if (this.isSame(other)) {
-          if (other.isObject() && other.more()) {
-            yield* this.unify(other.rest());
-          } else {
-            yield true;
-          }
-        } else if (other.isObject()) {
-          this.restMatch = other;
-          try {
-            yield true;
-          } finally {
-            this.restMatch = null;
-          }
-        }
-      } else {
-        yield* this.restMatch.unify(other);
-      }
-    }
-  }
 
   class ImmutableView<T extends Immutable = Immutable> extends View {
     constructor(public match: MatchSet, public value: T) {
@@ -994,17 +792,25 @@
     }
   }
 
-  const [params, left, right] = args();
+  const [params, left, right, more] = args();
   const llOps: [
     (Expr | RestArg)[],
     (statement: ArrayView, facts: Facts) => Generator<boolean>
   ][] = [
     [
-      [",", left, right],
+      [",", left, right, ...more],
       function* _comma(statement, facts) {
         const scope = statement.match;
         for (const _ of _call(scope.get(left) as ArrayView<any>, facts)) {
-          yield* _call(scope.get(right) as ArrayView<any>, facts);
+          const moreValue = scope.get(more);
+          if (moreValue.isArray() && !moreValue.empty()) {
+            yield* _call(
+              ViewFactory.array(scope, [",", right, ...more], 0) as ArrayView,
+              facts
+            );
+          } else {
+            yield* _call(scope.get(right) as ArrayView<any>, facts);
+          }
         }
       },
     ],
@@ -1120,33 +926,33 @@
         serialize(viewOf(n, [_0, _1, _2]))
       );
     }
-    for (const _ of _unify(viewOf(m, { ..._0 }), viewOf(n, { a: 1 }))) {
-      console.log(
-        serialize(viewOf(m, [_0, _1, _2])),
-        serialize(viewOf(n, [_0, _1, _2]))
-      );
-    }
-    for (const _ of _unify(
-      viewOf(m, { a: 1, c: 3, ..._0 }),
-      viewOf(n, { b: 2, ..._1 })
-    )) {
-      console.log(
-        serialize(viewOf(m, [_0, _1, _2])),
-        serialize(viewOf(n, [_0, _1, _2]))
-      );
-    }
-    for (const _ of _unify(
-      viewOf(m, [{ a: 1, c: 3, ..._0 }, _0]),
-      viewOf(n, [
-        { b: 2, ..._1 },
-        { d: 4, e: 5, ..._2 },
-      ])
-    )) {
-      console.log(
-        serialize(viewOf(m, [_0, _1, _2])),
-        serialize(viewOf(n, [_0, _1, _2]))
-      );
-    }
+    // for (const _ of _unify(viewOf(m, { ..._0 }), viewOf(n, { a: 1 }))) {
+    //   console.log(
+    //     serialize(viewOf(m, [_0, _1, _2])),
+    //     serialize(viewOf(n, [_0, _1, _2]))
+    //   );
+    // }
+    // for (const _ of _unify(
+    //   viewOf(m, { a: 1, c: 3, ..._0 }),
+    //   viewOf(n, { b: 2, ..._1 })
+    // )) {
+    //   console.log(
+    //     serialize(viewOf(m, [_0, _1, _2])),
+    //     serialize(viewOf(n, [_0, _1, _2]))
+    //   );
+    // }
+    // for (const _ of _unify(
+    //   viewOf(m, [{ a: 1, c: 3, ..._0 }, _0]),
+    //   viewOf(n, [
+    //     { b: 2, ..._1 },
+    //     { d: 4, e: 5, ..._2 },
+    //   ])
+    // )) {
+    //   console.log(
+    //     serialize(viewOf(m, [_0, _1, _2])),
+    //     serialize(viewOf(n, [_0, _1, _2]))
+    //   );
+    // }
     for (const _ of _call(
       viewOf(m, [",", ["value", _0, ..._1], ["log", _0, _1]]),
       new Facts().add(["value", 1]).add(["value", 2])
@@ -1217,6 +1023,83 @@
         ]
       )
       .call([",", ["get", [1, 2, 3, 4], 2, _0], ["log", _0]])) {
+    }
+    const start2 = process.hrtime.bigint();
+    const a = () => new Arg();
+    const [houses, drinksWater, zebraOwner, _5, _6, _7, _8, _9] = args();
+    for (const _ of new Facts()
+      .add(["house", _0, [_0, _1, _2, _3, _4]])
+      .add(["house", _0, [_1, _0, _2, _3, _4]])
+      .add(["house", _0, [_1, _2, _0, _3, _4]])
+      .add(["house", _0, [_1, _2, _3, _0, _4]])
+      .add(["house", _0, [_1, _2, _3, _4, _0]])
+      .add(["leftOf", _0, _1, [_0, _1, _2, _3, _4]])
+      .add(["leftOf", _0, _1, [_2, _0, _1, _3, _4]])
+      .add(["leftOf", _0, _1, [_2, _3, _0, _1, _4]])
+      .add(["leftOf", _0, _1, [_2, _3, _4, _0, _1]])
+      .add(["rightOf", _0, _1, [_1, _0, _2, _3, _4]])
+      .add(["rightOf", _0, _1, [_2, _1, _0, _3, _4]])
+      .add(["rightOf", _0, _1, [_2, _3, _1, _0, _4]])
+      .add(["rightOf", _0, _1, [_2, _3, _4, _1, _0]])
+      .add(["first", _0, [_0, _1, _2, _3, _4]])
+      .add(["middle", _0, [_1, _2, _0, _3, _4]])
+      .add(["nextTo", _0, _1, _2], ["leftOf", _0, _1, _2])
+      .add(["nextTo", _0, _1, _2], ["rightOf", _0, _1, _2])
+      .add(
+        ["problem", houses],
+        [
+          ",",
+          ["house", ["brit", a(), a(), "red", a()], houses],
+          // ["log", houses],
+          ["house", ["spaniard", "dog", a(), a(), a()], houses],
+          // ["log", houses],
+          ["house", [a(), a(), "coffee", "green", a()], houses],
+          // ["log", houses],
+          ["house", ["ukrainian", a(), "tea", a(), a()], houses],
+          // ["log", houses],
+          [
+            "rightOf",
+            [a(), a(), a(), "green", a()],
+            [a(), a(), a(), "ivory", a()],
+            houses,
+          ],
+          // ["log", houses],
+          ["house", [a(), "snails", a(), a(), "oatmeal"], houses],
+          // ["log", houses],
+          ["house", [a(), a(), a(), "yellow", "chocolate chip"], houses],
+          // ["log", houses],
+          ["middle", [a(), a(), "milk", a(), a()], houses],
+          ["first", ["norwegian", a(), a(), a(), a()], houses],
+          [
+            "nextTo",
+            [a(), a(), a(), a(), "sugar"],
+            [a(), "fox", a(), a(), a()],
+            houses,
+          ],
+          [
+            "nextTo",
+            [a(), a(), a(), a(), "chocolate chip"],
+            [a(), "horse", a(), a(), a()],
+            houses,
+          ],
+          ["house", [a(), a(), "orange juice", a(), "peanut"], houses],
+          ["house", ["japanese", a(), a(), a(), "frosted"], houses],
+          [
+            "nextTo",
+            ["norwegian", a(), a(), a(), a()],
+            [a(), a(), a(), "blue", a()],
+            houses,
+          ],
+        ]
+      )
+      .call([
+        ",",
+        ["problem", houses],
+        ["house", [zebraOwner, "zebra", a(), a(), a()], houses],
+        ["house", [drinksWater, a(), "water", a(), a()], houses],
+        ["log", zebraOwner, drinksWater],
+      ])) {
+      console.log(process.hrtime.bigint() - start2);
     }
     // [
     //   _2,
