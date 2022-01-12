@@ -1,136 +1,27 @@
 {
   type Immutable = undefined | null | boolean | number | string | symbol;
 
-  type ObjectExpr =
-    | { [key: string]: Expr }
-    | {
-        [objectRestKeySymbol]: Arg;
-      };
+  type Expr =
+    | Immutable
+    | Arg
+    | (Expr | RestArg)[]
+    | ({ [key: string]: Expr } & { [objectRestKeySymbol]?: Arg });
+  type ArrayExpr<
+    T extends [] | Expr[] | (Expr | RestArg)[] =
+      | []
+      | Expr[]
+      | (Expr | RestArg)[]
+  > = T;
+  type ObjectExpr<O extends { [key: string]: Expr } = { [key: string]: Expr }> =
+    O & { [objectRestKeySymbol]?: Arg };
 
-  type ArrayExpr = (Expr | RestArg)[];
-
-  type Expr = Immutable | Arg | ArrayExpr | ObjectExpr;
-
-  type Storable = Immutable | View;
-
-  type Stmt = readonly [string, ...Expr[]];
-
-  type Constructor<T, P extends any[]> = new (...params: P) => T;
-  interface Ref<P extends any[] = any[]> {
-    pool?: Pool<Constructor<this, P>>;
-
-    reinit(...params: ConstructorParameters<Constructor<this, P>>): this;
-    deinit(): this;
-    retain(): this;
-    release(): asserts this is never;
-  }
-
-  const DONE_YIELD = { value: null, done: true };
-
-  class GuardRef<T extends Ref<[ref: T]>>
-    implements Generator<T>, Ref<[ref: T]>
-  {
-    i = 0;
-    refYield: { value: T };
-    pool: Pool<Constructor<this, [ref: T]>> = null;
-    refCount = 0;
-    constructor(ref: T) {
-      ref.retain();
-      this.refYield = { value: ref };
-    }
-    reinit(ref: T) {
-      ref.retain();
-      this.i = 0;
-      this.refYield.value = ref;
-      return this;
-    }
-    deinit() {
-      this.refYield.value.release();
-      this.refYield.value = null;
-      return this;
-    }
-    retain() {
-      this.refCount++;
-      return this;
-    }
-    release() {
-      this.refCount--;
-      if (this.refCount === 0 && this.pool !== null) {
-        this.pool.freeItem(this.deinit());
-      }
-    }
-    next() {
-      if (this.i++ === 0) {
-        return this.refYield;
-      }
-      return DONE_YIELD;
-    }
-    throw(err: any): IteratorResult<T> {
-      this.release();
-      throw err;
-    }
-    return() {
-      this.release();
-      return DONE_YIELD;
-    }
-    [Symbol.iterator]() {
-      this.retain();
-      return this;
-    }
-  }
-
-  interface Pool<
-    C extends Constructor<T, P>,
-    T extends Ref<P> = C extends Constructor<infer R, any> ? R : never,
-    P extends any[] = ConstructorParameters<C>
-  > {
-    newItem(...params: ConstructorParameters<C>): T;
-    freeItem(item: T): asserts item is never;
-  }
-
-  class BasePool<
-    C extends Constructor<T, P>,
-    T extends Ref<P> = C extends Constructor<infer R, any> ? R : never,
-    P extends any[] = ConstructorParameters<C>
-  > implements Pool<C, T>
-  {
-    _pool: T[] = [];
-    poolLimit: number;
-    constructor(private newRef: C, { poolLimit }: { poolLimit: number }) {
-      this.poolLimit = poolLimit;
-    }
-    newItem(...params: ConstructorParameters<C>): T {
-      if (this._pool.length > 0) {
-        return this._pool.pop().reinit(...(params as any));
-      }
-      const ref = new this.newRef(...(params as any));
-      ref.pool = this;
-      return ref;
-    }
-    freeItem(item: T): asserts item is never {
-      if (this._pool.length < this.poolLimit) {
-        this._pool.push(item);
-      }
-    }
-  }
-
-  const yieldOnePool = new BasePool(GuardRef, { poolLimit: 128 });
-
-  function guardRef<T extends Ref>(ref: T) {
-    return yieldOnePool.newItem(ref);
-  }
+  type Stmt = [string, ...ArrayExpr];
 
   const objectRestKey = "__UNIFY_VIEW__OBJECT_REST_KEY";
   const objectRestKeySymbol = Symbol.for(objectRestKey);
 
   class Arg {
-    [objectRestKeySymbol]: Arg;
-
-    constructor(private _id?: number, private _debugId?: any) {
-      this[objectRestKeySymbol] = this;
-      Object.defineProperty(this, "_id", { enumerable: false });
-      Object.defineProperty(this, "_debugId", { enumerable: false });
-    }
+    constructor(private _id?: number, private _debugId?: any) {}
 
     get id() {
       return this._id;
@@ -153,36 +44,31 @@
     }
   }
 
+  class RestArg {
+    constructor(public arg: Arg) {}
+  }
+
   const MAX_NEW_ARGS = 32;
   let nextGlobalArgId = 0;
-  function* args() {
+  function* args(...ids: any[]) {
     let i = 0;
     for (; i < MAX_NEW_ARGS; i++) {
-      yield new Arg(undefined, nextGlobalArgId++);
+      yield new Arg(ids[i], nextGlobalArgId++);
     }
     throw new Error(`Created too many (${i}) args.`);
   }
 
-  class RestArg {
-    arg: Arg;
-    constructor(arg: Arg) {
-      this.arg = arg;
-      this[objectRestKeySymbol] = this;
-      Object.defineProperty(this, "arg", { enumerable: false });
-    }
-  }
-
-  const TRUE = ["true"] as const;
+  const TRUE = ["true"] as [string];
 
   class Facts {
-    facts = [];
+    facts = [] as { statement: Stmt; condition: Stmt }[];
     add(statement: Stmt, condition: Stmt = TRUE) {
       this.facts.push({ statement, condition });
       return this;
     }
-    *call(statement: [string, ...Expr[]]) {
+    *call(statement: [string, ...ArrayExpr]) {
       const scope = new MatchMap();
-      for (const _ of _call(new ArrayView(scope, statement, 0), this)) {
+      for (const _ of _call(ViewFactory.array(scope, statement, 0), this)) {
         yield scope;
       }
     }
@@ -191,6 +77,7 @@
   interface Match {
     has(arg: Arg): boolean;
     get(arg: Arg): View;
+    serialize(view?: View): any;
   }
 
   interface MatchSet extends Match {
@@ -198,11 +85,8 @@
     delete(arg: Arg): this;
   }
 
-  class MatchMap implements MatchSet, Ref {
+  class MatchMap implements MatchSet {
     map = new Map();
-    pool: Pool<Constructor<this, []>> = null;
-    refCount = 0;
-    changes = 0;
     constructor() {}
     has(arg: Arg): boolean {
       return this.map.has(arg);
@@ -213,75 +97,41 @@
       }
       return this.map.get(arg);
     }
+    serialize(value?: Expr | View) {
+      if (value === undefined) {
+        return Array.from(this.map.entries()).reduce(
+          (carry, [arg, view], index) => {
+            carry[arg.id || `_${index}`] = view.serialize();
+            return carry;
+          },
+          {}
+        );
+      }
+      return serialize(ViewFactory.view(this, value));
+    }
     set(arg: Arg, value: View) {
-      this.changes++;
       this.map.set(arg, value);
       return this;
     }
     delete(arg: Arg) {
-      this.changes--;
       this.map.delete(arg);
       return this;
     }
-    reinit() {
-      return this;
-    }
-    deinit() {
-      if (this.changes > 0) {
-        this.map.clear();
-        this.changes = 0;
-      }
-      return this;
-    }
-    retain() {
-      this.refCount++;
-      return this;
-    }
-    release() {
-      this.refCount--;
-      if (this.refCount === 0 && this.pool !== null) {
-        this.pool.freeItem(this.deinit());
-      }
-    }
   }
 
-  const pools = {
-    match: new BasePool(MatchMap, { poolLimit: 128 }),
-  };
-
-  type ViewOf<T extends Expr | View> = T extends Arg
+  type ViewOf<T extends Expr | View> = T extends View
+    ? T
+    : T extends Arg
     ? ArgView
-    : T extends (infer R)[]
-    ? R extends Expr
-      ? ArrayView<R>
-      : ArrayView<Expr>
-    : T extends { [key: string]: infer R }
-    ? R extends Expr
-      ? ObjectView<R>
-      : ObjectView<Expr>
+    : T extends Expr[]
+    ? ArrayView<T>
+    : T extends (Expr | RestArg)[]
+    ? View
+    : T extends { [key: string]: Expr }
+    ? ObjectView<T>
     : T extends Immutable
     ? ImmutableView<T>
     : never;
-
-  function viewOf<T extends Expr | View>(match: MatchSet, target: T): ViewOf<T>;
-  function viewOf(match: MatchSet, target: Expr | View) {
-    return ViewFactory.view(match, target);
-    // if (target instanceof View) {
-    //   return target;
-    // } else if (typeof target === "object") {
-    //   if (target === null) {
-    //     return new ImmutableView(match, target as null);
-    //   } else if (Array.isArray(target)) {
-    //     return new ArrayView(match, target, 0);
-    //   } else if (target instanceof Arg) {
-    //     return new ArgView(match, target);
-    //   } else {
-    //     return new ObjectView(match, target);
-    //   }
-    // } else {
-    //   return new ImmutableView(match, target);
-    // }
-  }
 
   function serialize(value: View) {
     return value.serialize();
@@ -292,21 +142,24 @@
     isArg(): this is ArgView {
       return false;
     }
-    isArray(): this is ArrayView<any> {
+    isArray(): this is ArrayView {
       return false;
     }
-    isObject(): this is ObjectView<any> {
+    isObject(): this is ObjectView {
       return false;
     }
-    isImmutable(): this is ImmutableView<any> {
+    isImmutable(): this is ImmutableView {
       return false;
     }
     abstract isSame(other: View): boolean;
     abstract serialize(): any;
-    abstract unify(other: View);
+    abstract unify(other: View): Generator<boolean>;
   }
-  // [['=', {b: 2, aa : 3, ...p}, {a: 1, b: 2, ...q}]]
   class ViewFactory {
+    static view<T extends Expr | View, R extends View = ViewOf<T>>(
+      match: MatchSet,
+      target: T
+    ): R;
     static view(match: MatchSet, target: Expr | View): View {
       if (target instanceof View) {
         return target;
@@ -318,10 +171,10 @@
         } else if (target instanceof Arg) {
           return ViewFactory.arg(match, target);
         } else {
-          return new ObjectView(match, target);
+          return new ObjectView(match, target as ObjectExpr);
         }
       } else {
-        return new ImmutableView(match, target);
+        return new ImmutableView(match, target as Immutable);
       }
     }
     static arg(match: MatchSet, target: Arg): View {
@@ -333,15 +186,25 @@
       }
       return new ArgView(match, target);
     }
-    static array<T extends Expr | RestArg>(
+    static array<T extends [Expr, ...ArrayExpr]>(
       match: MatchSet,
-      target: T[],
+      target: T,
+      index: 0
+    ): ArrayView<T>;
+    static array<T extends ArrayExpr, R = ViewOf<T>>(
+      match: MatchSet,
+      target: T,
+      index: number
+    ): R;
+    static array<T extends ArrayExpr>(
+      match: MatchSet,
+      target: T,
       index: number
     ) {
       if (target.length === index) {
         return new EmptyArrayView(match, target, index);
       } else if (target[index] instanceof RestArg) {
-        return new ArgView(match, (target[index] as RestArg).arg).get();
+        return ViewFactory.arg(match, (target[index] as RestArg).arg);
       }
       return new IndexArrayView(match, target, index);
     }
@@ -349,15 +212,6 @@
   class ArgView extends View {
     constructor(public match: MatchSet, public target: Arg) {
       super();
-    }
-    static of(match: MatchSet, target: Arg) {
-      if (match.has(target)) {
-        const view = match.get(target);
-        if (view.isArg()) {
-          return view.get();
-        }
-      }
-      return new ArgView(match, target);
     }
     isArg(): this is ArgView {
       return true;
@@ -421,15 +275,15 @@
     }
   }
 
-  class ArrayView<T extends Expr | RestArg = Expr | RestArg> extends View {
+  class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
     constructor(
       public match: MatchSet,
-      public target: T[],
+      public target: T,
       public start: number
     ) {
       super();
     }
-    isArray(): this is ArrayView<Expr> {
+    isArray(): this is ArrayView {
       return true;
     }
     isSame(other: View) {
@@ -443,18 +297,10 @@
     serialize() {
       if (this.target.length === this.start) {
         return [];
+      } else if (this.target[this.start] instanceof RestArg) {
+        return this.rest().serialize();
       }
-      const lastIndex = this.target.length - 1;
-      const lastItem = this.target[lastIndex];
-      if (lastItem instanceof RestArg) {
-        return this.target
-          .slice(this.start, lastIndex)
-          .map((entry) => viewOf(this.match, entry as Expr).serialize())
-          .concat(...new ArgView(this.match, lastItem.arg).serialize());
-      }
-      return this.target
-        .slice(this.start)
-        .map((entry) => viewOf(this.match, entry as Expr).serialize());
+      return [this.first().serialize(), ...this.rest().serialize()];
     }
     *unify(other: View) {
       if (other.isArg()) {
@@ -485,27 +331,16 @@
       return this.target[this.start] instanceof RestArg;
     }
     first(): View {
-      return viewOf(this.match, this.target[this.start] as Expr);
+      return ViewFactory.view(this.match, this.target[this.start] as Expr);
     }
-    rest<R = T extends string ? ArrayView<string> : never>(): R;
+    rest<R = T extends Expr[] ? ArrayView<T> : never>(): R;
     rest(): View;
-    rest(): View {
-      if (this.target[this.start] instanceof RestArg) {
-        return new ArgView(
-          this.match,
-          (this.target[this.start] as RestArg).arg
-        ).get();
-      } else if (this.target[this.start + 1] instanceof RestArg) {
-        return new ArgView(
-          this.match,
-          (this.target[this.start + 1] as RestArg).arg
-        ).get();
-      }
-      return new ArrayView(this.match, this.target, this.start + 1);
+    rest() {
+      return ViewFactory.array(this.match, this.target, this.start + 1);
     }
   }
 
-  class IndexArrayView<T extends Expr | RestArg> extends ArrayView<T> {
+  class IndexArrayView<T extends ArrayExpr = ArrayExpr> extends ArrayView<T> {
     *unify(other: View) {
       if (other.isArg()) {
         yield* other.unify(this);
@@ -529,25 +364,7 @@
     }
   }
 
-  class RestArrayView<T extends Expr | RestArg> extends ArrayView<T> {
-    *unify(other: View) {
-      if (other.isArg()) {
-        yield* other.unify(this);
-      } else if (this.isSame(other)) {
-        yield true;
-      } else if (other.isArray()) {
-        yield* this.rest().unify(other);
-      }
-    }
-    empty() {
-      return true;
-    }
-    more() {
-      return true;
-    }
-  }
-
-  class EmptyArrayView<T extends Expr | RestArg> extends ArrayView<T> {
+  class EmptyArrayView<T extends ArrayExpr = ArrayExpr> extends ArrayView<T> {
     serialize() {
       return [];
     }
@@ -559,6 +376,8 @@
       } else if (other.isArray()) {
         if (other.empty() && other.more()) {
           yield* this.unify(other.rest());
+        } else if (other.empty()) {
+          yield true;
         }
       }
     }
@@ -573,15 +392,15 @@
     }
   }
 
-  class ObjectView<V extends Expr> extends View {
+  class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
     constructor(
       public match: MatchSet,
-      public target: ObjectExpr,
-      public keys = new ArrayView(match, Object.keys(target).sort(), 0)
+      public target: V,
+      public keys = ViewFactory.array(match, Object.keys(target).sort(), 0)
     ) {
       super();
     }
-    isObject(): this is ObjectView<Expr> {
+    isObject(): this is ObjectView<V> {
       return true;
     }
     isSame(other: View) {
@@ -623,7 +442,6 @@
     }
     more() {
       return false;
-      // return this.target[objectRestKeySymbol] instanceof Arg;
     }
     firstKey(): string {
       return this.keys.first().serialize();
@@ -631,18 +449,12 @@
     firstValue() {
       return ViewFactory.view(this.match, this.target[this.firstKey()]);
     }
-    // first() {
-    //   return new ObjectKeyView(this.match, this.target, this.firstKey());
-    // }
     rest() {
-      // if (this.empty() && this.more()) {
-      //   return new ObjectRestView(this.match, this.target).rest();
-      // }
       return new ObjectView(this.match, this.target, this.keys.rest());
     }
   }
 
-  const EMPTY_ARRAY_VIEW = new ArrayView(null, [], 0);
+  const EMPTY_ARRAY_VIEW = ViewFactory.array(null, [], 0);
   const EMPTY_OBJECT_VIEW = new ObjectView(null, {}, EMPTY_ARRAY_VIEW);
 
   class ImmutableView<T extends Immutable = Immutable> extends View {
@@ -667,106 +479,8 @@
     }
   }
 
-  // [';',
-  //   ['isSame', left, right],
-  // [';',
-  //   [',', ['isBound', left], [',', ['binding', left, left2], ['=', left2, right]]],
-  // [';',
-  //   [',', ['isUnbound', left], ['bind', left, right]],
-  // [';',
-  //   [',', ['isArg', right], ['=', right, left]],
-  // [';',
-  //   [',', [',', ['isArray', left], ['isArray', right]], [
-  //     [';',
-  //
-  //     ]
-  //   ]],
-  // ]
-  // ]
-  // ]
-  // ]
-  // ];
-
-  // [
-  //   ["->js", ["=", _0, _1], _options, _js],
-  //   [
-  //     ",",
-  //     ["get", _options, "generator", true],
-  //     [
-  //       ";",
-  //       [
-  //         ",",
-  //         ["isArray", _0],
-  //         ["->js", ["ArrayView.isSame", _0, _1], _options, _isSame],
-  //         [
-  //           "=",
-  //           _js,
-  //           [
-  //             "if (",
-  //             _isSame,
-  //             ") {",
-  //             "yield true;",
-  //             "}",
-  //             "else if (",
-  //             _1,
-  //             ".isArg()) {",
-  //             "}",
-  //           ],
-  //         ],
-  //       ],
-  //     ],
-  //   ],
-  // ][
-  //   (["call", [_id, ..._params]],
-  //   [
-  //     ",",
-  //     ["fact", _id, _fact],
-  //     [
-  //       ",",
-  //       ["fact.statement", _fact, [_id, ..._params]],
-  //       [",", ["fact.condition", _fact, _condition], ["call", _condition]],
-  //     ],
-  //   ])
-  // ];
-
-  // function* and(left, right) {
-  // }
-
   function* _unify<S extends View, T extends View>(left: S, right: T) {
     yield* left.unify(right);
-    // if (left.isSame(right)) {
-    //   yield true;
-    // } else if (left.isArg()) {
-    //   if (left.bound()) {
-    //     yield* _unify(left.get(), right);
-    //   } else {
-    //     yield* left.guard(right);
-    //   }
-    // } else if (right.isArg()) {
-    //   yield* _unify(right, left);
-    // } else if (left.isArray() && right.isArray()) {
-    //   if (!left.empty() && !right.empty()) {
-    //     for (const _ of _unify(left.first(), right.first())) {
-    //       yield* _unify(left.rest(), right.rest());
-    //     }
-    //   } else if (left.empty() && left.more()) {
-    //     yield* _unify(left.rest(), right);
-    //   } else if (right.empty() && right.more()) {
-    //     yield* _unify(left, right.rest());
-    //   } else if (left.empty() && right.empty()) {
-    //     yield true;
-    //   }
-    // } else if (left.isObject() && right.isObject()) {
-    //   if (left.keys.empty() && right.keys.empty()) {
-    //     yield true;
-    //   } else if (!left.keys.empty() && !right.keys.empty()) {
-    //     if (left.keys.first() === right.keys.first()) {
-    //       for (const _ of _unify(left.firstValue(), right.firstValue())) {
-    //         yield* _unify(left.rest(), right.rest());
-    //       }
-    //     }
-    //   }
-    // }
   }
 
   class CutError extends Error {}
@@ -794,14 +508,14 @@
 
   const [params, left, right, more] = args();
   const llOps: [
-    (Expr | RestArg)[],
+    [string, ...ArrayExpr],
     (statement: ArrayView, facts: Facts) => Generator<boolean>
   ][] = [
     [
       [",", left, right, ...more],
       function* _comma(statement, facts) {
         const scope = statement.match;
-        for (const _ of _call(scope.get(left) as ArrayView<any>, facts)) {
+        for (const _ of _call(scope.get(left) as ArrayView, facts)) {
           const moreValue = scope.get(more);
           if (moreValue.isArray() && !moreValue.empty()) {
             yield* _call(
@@ -809,7 +523,7 @@
               facts
             );
           } else {
-            yield* _call(scope.get(right) as ArrayView<any>, facts);
+            yield* _call(scope.get(right) as ArrayView, facts);
           }
         }
       },
@@ -818,8 +532,8 @@
       [";", left, right],
       function* _comma(statement, facts) {
         const scope = statement.match;
-        yield* _call(scope.get(left) as ArrayView<any>, facts);
-        yield* _call(scope.get(right) as ArrayView<any>, facts);
+        yield* _call(scope.get(left) as ArrayView, facts);
+        yield* _call(scope.get(right) as ArrayView, facts);
       },
     ],
     [
@@ -883,9 +597,10 @@
   ];
 
   function* _call(statement: ArrayView, facts: Facts) {
-    for (const scope of guardRef(pools.match.newItem())) {
+    const scope = new MatchMap();
+    {
       for (const [llOp, llAction] of llOps) {
-        const llOpView = new ArrayView(scope, llOp, 0);
+        const llOpView = ViewFactory.array(scope, llOp, 0);
         for (const _ of _unify(llOpView, statement)) {
           yield* llAction(llOpView, facts);
           return;
@@ -895,10 +610,10 @@
       try {
         for (const fact of facts.facts) {
           for (const _ of _unify(
-            new ArrayView(scope, fact.statement, 0),
+            ViewFactory.array(scope, fact.statement, 0),
             statement
           )) {
-            yield* _call(new ArrayView(scope, fact.condition, 0), facts);
+            yield* _call(ViewFactory.array(scope, fact.condition, 0), facts);
           }
         }
       } catch (err) {
@@ -908,6 +623,11 @@
         throw err;
       }
     }
+  }
+
+  function viewOf<T extends Expr | View>(match: MatchSet, target: T): ViewOf<T>;
+  function viewOf(match: MatchSet, target: Expr | View) {
+    return ViewFactory.view(match, target);
   }
 
   {
@@ -1026,7 +746,11 @@
     }
     const start2 = process.hrtime.bigint();
     const a = () => new Arg();
-    const [houses, drinksWater, zebraOwner, _5, _6, _7, _8, _9] = args();
+    const [houses, drinksWater, zebraOwner, _5, _6, _7, _8, _9] = args(
+      "houses",
+      "drinksWater",
+      "zebraOwner"
+    );
     for (const _ of new Facts()
       .add(["house", _0, [_0, _1, _2, _3, _4]])
       .add(["house", _0, [_1, _0, _2, _3, _4]])
@@ -1100,32 +824,7 @@
         ["log", zebraOwner, drinksWater],
       ])) {
       console.log(process.hrtime.bigint() - start2);
+      console.log(_.serialize());
     }
-    // [
-    //   _2,
-    //   "is",
-    //   0,
-    //   ",",
-    //   _3,
-    //   "=",
-    //   _0,
-    //   ";",
-    //   ["get", _1, _4, _3],
-    //   ",",
-    //   [_2, "is", _4, "+", 1],
-    // ];
-    // [
-    //   ["rewrite", _0, _0],
-    //   [",", ["=", [_1, ..._2], _0], [",", ["isString", _1], ["cut"]]],
-    // ];
-    // [
-    //   ["rewrite", [_0, _1, ",", ..._2], _3],
-    //   [",", ["rewrite", []]],
-    // ];
-    // [["rewrite", [_0, "is", _1], ["is", _0, _1]]];
-    // [["rewrite", [_0, ",", _1], [",", _0, _1]]];
-    // [["rewrite", [_0, "is", _1], ["is", _0, _1]]];
-    // [["rewrite", [_0, "=", _1], ["=", _0, _1]]];
-    // [["rewrite", _0, _0]];
   }
 }
