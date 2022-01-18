@@ -476,7 +476,7 @@ export class ImmutableView<T extends Immutable = Immutable> extends View {
   }
 }
 
-function* _unify<S extends View, T extends View>(left: S, right: T) {
+export function* _unify<S extends View, T extends View>(left: S, right: T) {
   yield* left.unify(right);
 }
 
@@ -762,7 +762,7 @@ const llOps: [
   ],
 ];
 
-function* _call(statement: ArrayView, facts: Facts) {
+export function* _call(statement: ArrayView, facts: Facts) {
   const scope = new MatchMap();
   {
     for (const [llOp, llAction] of llOps) {
