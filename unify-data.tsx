@@ -45,7 +45,48 @@ const facts = new Facts()
       ],
     ]
   )
+  .add(["setPath", oldValue, [], nestedValue, nestedValue])
+  .add(
+    ["setPath", oldValue, [_0, ..._1], nestedValue, newValue],
+    [
+      ",",
+      ["get", oldValue, _0, oldValueSub],
+      ["setPath", oldValueSub, _1, nestedValue, newValueSub],
+      ["set", oldValue, _0, newValueSub, newValue],
+    ]
+  )
+  .add(["setting", languageId, language], ["language", language, meta])
+  .add(
+    ["type", ["language", uniqueId, meta]],
+    [
+      ",",
+      ["uuid", uniqueId],
+      ["get", meta, "symbol", value],
+      ["isString", value],
+    ]
+  )
+  .add(["language", englishUSID, { symbol: "enUS" }])
   .add(["save", value], [",", ["type", value], ["assert", value]])
+  .add(
+    ["component", caseId, [{ construct, goal }, component], component],
+    [",", construct, goal]
+  )
+  .add(
+    [
+      "component",
+      switchId,
+      [{ construct, cases }, defaultComponent],
+      component,
+    ],
+    [
+      ";",
+      [",", construct, ["get", cases, _, { goal, component }], goal],
+      ["=", component, defaultComponent],
+    ]
+  )
+  .add(["component", textId, { text }, component])
+  .add(["debugName", _, "input"])
+  .add(["component", _, ["field", props, children], component])
   .add(
     [
       "view",
@@ -67,8 +108,16 @@ const facts = new Facts()
             "block",
             [],
             [
-              ["button", [], ["save"]],
-              ["button", [], ["revert"]],
+              [
+                "button",
+                [["click", ["save", [type, id, newValue]]]],
+                [["text", { default: "save" }]],
+              ],
+              [
+                "button",
+                [["click", clickRevert]],
+                [["text", _, { default: "revert" }]],
+              ],
             ],
           ],
           ["block", [], input],
@@ -79,11 +128,38 @@ const facts = new Facts()
       ",",
       ["call", [type, id, value]],
       ["type", [type, id, shape]],
+      ["Shape.copy", shape, value, newValue],
       [
         "forEach",
-        ["get", shape, key, member],
-        ["view", "input", member, input],
+        ["get", shape, key, shapeMember],
+        [
+          ",",
+          ["get", value, key, valueMember],
+          ["get", newValue, key, newValueMember],
+          ["view", "input", [shapeMember, valueMember, newValueMember], input],
+        ],
         input,
+      ],
+      [
+        "=",
+        clickSave,
+        [
+          ",",
+          [
+            "forEach",
+            [
+              ",",
+              ["get", shape, key, shapeMember],
+              ["get", input, _, inputSub],
+            ],
+            [
+              ",",
+              ["view", "input", [shapeMember, _, newValueMember], inputSub],
+            ],
+            [key, newValueMember],
+          ],
+          ["entries", newValue, newValueMember],
+        ],
       ],
     ]
   );

@@ -12,7 +12,23 @@ const facts = new Facts()
         type: "if",
         condition: {
           type: "call",
-          target: { type: "property", target: {}, name: "isArg" },
+          target: {
+            type: "property",
+            target: {
+              type: "call",
+              target: {
+                type: "property",
+                target: {
+                  type: "property",
+                  target: { type: "variable", name: "statement" },
+                  name: "context",
+                },
+                name: "get",
+              },
+              parameters: [{ type: "arg", target: _2 }],
+            },
+            name: "isArg",
+          },
         },
         block: null,
       },

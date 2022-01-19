@@ -559,6 +559,31 @@ const llOps: [
     },
   ],
   [
+    ["assert", left],
+    function* _assert(statement, facts) {
+      facts.add(serialize(statement.context.get(left)));
+      yield true;
+    },
+  ],
+  [
+    ["reject", left],
+    function* _f(statement, facts) {
+      const context = new MatchMap();
+      let index = 0;
+      for (const entry of facts.facts) {
+        for (const _ of _unify(
+          ViewFactory.array(context, entry as any, 0),
+          statement.context.get(left)
+        )) {
+          facts.facts.splice(index, 1);
+          yield true;
+          return;
+        }
+        index++;
+      }
+    },
+  ],
+  [
     ["is", left, right],
     function* _settle(statement, facts) {
       const scope = statement.context;
@@ -676,7 +701,14 @@ const llOps: [
   ],
   [
     ["forEach", constructArg, goalArg, itemArg],
-    function* _forEach(statement, facts) {},
+    function* _forEach(statement, facts) {
+      const forEachContext = new MatchMap();
+      const construct = statement.context.get(constructArg);
+      if (!construct.isArray()) {
+      }
+      for (const _ of _call(statement.context.get(constructArg), facts)) {
+      }
+    },
   ],
   [["is.number", numberArg], function* _numberIs(statement, facts) {}],
   [["is.bigint", numberArg], function* _bigintIs(statement, facts) {}],
