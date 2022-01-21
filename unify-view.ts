@@ -150,6 +150,7 @@ export abstract class View {
   }
   abstract isSame(other: View): boolean;
   abstract serialize(): any;
+  abstract copyTo(context: MatchSet): View;
   abstract unify(other: View): Generator<boolean>;
 }
 export class ViewFactory {
@@ -223,6 +224,12 @@ export class ArgView extends View {
     }
     return value.serialize();
   }
+  copyTo(context: MatchSet) {
+    if (this.context.has(this.target)) {
+      context.set(this.target, this.context.get(this.target).copyTo(context));
+    }
+    return new ArgView(context, this.target);
+  }
   *unify(other: View): Generator<boolean> {
     if (
       other.isArg() &&
@@ -294,6 +301,17 @@ export class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
       return this.rest().serialize();
     }
     return [this.first().serialize(), ...this.rest().serialize()];
+  }
+  copyTo(context: MatchSet) {
+    if (this.empty() && this.more()) {
+      return this.rest().copyTo(context);
+    } else if (!this.empty()) {
+      this.first().copyTo(context);
+      this.rest().copyTo(context);
+      return ViewFactory.array(context, this.target, this.start);
+    } else {
+      return ViewFactory.array(context, this.target, this.start);
+    }
   }
   *unify(other: View) {
     if (other.isArg()) {
@@ -415,6 +433,14 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
       ...(this.more() ? this.rest().serialize() : {}),
     };
   }
+  copyTo(context: MatchSet) {
+    if (this.empty()) {
+      return new ObjectView(context, this.target, this.keys);
+    }
+    this.firstValue().copyTo(context);
+    this.rest().copyTo(context);
+    return new ObjectView(context, this.target, this.keys);
+  }
   *unify(other: View) {
     if (other.isArg()) {
       yield* other.unify(this);
@@ -466,6 +492,9 @@ export class ImmutableView<T extends Immutable = Immutable> extends View {
   }
   serialize() {
     return this.value;
+  }
+  copyTo(context: MatchSet) {
+    return new ImmutableView(context, this.value);
   }
   *unify(other: View) {
     if (other.isArg()) {
@@ -697,6 +726,22 @@ const llOps: [
         }
       }
       yield true;
+    },
+  ],
+  [
+    ["findall", templateArg, goalArg, bagArg],
+    function* _findall(statement, facts) {
+      const bag = [];
+      for (const _ of _call(
+        statement.context.get(goalArg) as ArrayView,
+        facts
+      )) {
+        bag.push(statement.context.get(templateArg).copyTo(new MatchMap()));
+      }
+      yield* _unify(
+        statement.context.get(bagArg),
+        ViewFactory.array(statement.context, bag, 0)
+      );
     },
   ],
   [

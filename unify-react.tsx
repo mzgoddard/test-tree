@@ -56,14 +56,14 @@ const facts = new Facts()
       renderedProps,
     ]
   )
+  .add(["render", ["children", []], []])
   .add(
-    ["render", ["children", children], renderedChildren],
     [
-      "forEach",
-      ["get", children, childIndex, childValue],
-      ["render", childValue, renderedChildren],
-      renderedChildren,
-    ]
+      "render",
+      ["children", [child, ...children]],
+      [renderedChild, ...renderedChildren],
+    ],
+    ["render", child, renderedChild]
   )
   .add(
     ["render", ["html", tag, props, children], component],
