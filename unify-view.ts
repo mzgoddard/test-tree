@@ -116,6 +116,8 @@ export class MatchMap implements MatchSet {
     this.map.delete(arg);
     return this;
   }
+  create() {}
+  snapshot() {}
 }
 
 export class ContextChain implements MatchSet {
