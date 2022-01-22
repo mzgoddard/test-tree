@@ -1,3 +1,5 @@
+import { threadId } from "worker_threads";
+
 export type Immutable = undefined | null | boolean | number | string | symbol;
 
 export type Expr =
@@ -115,6 +117,153 @@ export class MatchMap implements MatchSet {
     return this;
   }
 }
+
+export class ContextChain implements MatchSet {
+  constructor(public first: MatchSet, public second: MatchSet) {}
+  has(arg: Arg) {
+    return this.first.has(arg) || this.second.has(arg);
+  }
+  get(arg: Arg) {
+    if (this.first.has(arg)) {
+      return this.first.get(arg);
+    } else if (this.second.has(arg)) {
+      return this.second.get(arg);
+    }
+    return new ArgView(this, arg);
+  }
+  set(arg: Arg, value: View) {
+    this.second.set(arg, value);
+    return this;
+  }
+  delete(arg: Arg) {
+    this.second.delete(arg);
+    return this;
+  }
+  serialize(value: Expr | View) {
+    if (value === undefined) {
+      return { ...this.first.serialize(), ...this.second.serialize() };
+    }
+    return serialize(ViewFactory.view(this, value));
+  }
+}
+
+export class MaskedContextChain implements MatchSet {
+  constructor(public mask: Set<Arg>, public next: MatchSet) {}
+  has(arg: Arg) {
+    if (this.mask.has(arg)) {
+      return false;
+    }
+    return this.next.has(arg);
+  }
+  get(arg: Arg) {
+    if (!this.mask.has(arg) && this.next.has(arg)) {
+      return this.next.get(arg);
+    }
+    return new ArgView(this, arg);
+  }
+  set(arg: Arg, value: View): never {
+    throw new Error();
+  }
+  delete(arg: Arg) {
+    this.mask.add(arg);
+    return this;
+  }
+  serialize(value: Expr | View) {
+    if (value === undefined) {
+      throw new Error();
+    }
+    return serialize(ViewFactory.view(this, value));
+  }
+}
+
+export class ContextStack {
+  constructor(public stack: Map<MatchSet, Map<Arg, View>>) {}
+  has(context: MatchSet, arg: Arg) {
+    return this.stack.has(context) && this.stack.get(context).has(arg);
+  }
+  get(context: MatchSet, arg: Arg) {
+    if (this.has(context, arg)) {
+      return this.stack.get(context).get(arg);
+    }
+  }
+  set(context: MatchSet, arg: Arg, value: View) {
+    if (!this.stack.has(context)) {
+      this.stack.set(context, new Map());
+    }
+    this.stack.get(context).set(arg, value);
+    return this;
+  }
+  delete(context: MatchSet, arg: Arg) {
+    if (this.stack.has(context)) {
+      const item = this.stack.get(context);
+      item.delete(arg);
+      if (item.size === 0) {
+        this.stack.delete(context);
+      }
+    }
+    return this;
+  }
+}
+
+export class ContextMask {
+  constructor(
+    public mask: Map<MatchSet, Set<Arg>>,
+    public stack: ContextStack
+  ) {}
+  has(context: MatchSet, arg: Arg) {
+    if (this.mask.has(context) && this.mask.get(context).has(arg)) {
+      return false;
+    }
+    return this.stack.has(context, arg);
+  }
+  get(context: MatchSet, arg: Arg) {
+    if (this.has(context, arg)) {
+      return this.stack.get(context, arg);
+    }
+    return new ArgView(this, arg);
+  }
+  set(context: MatchSet, arg: Arg, value: View) {
+    throw new Error();
+  }
+  delete(context: MatchSet, arg: Arg) {
+    if (!this.mask.has(context)) {
+      this.mask.set(context, new Set());
+    }
+    this.mask.get(context).add(arg);
+  }
+}
+
+export class ContextSnapshot {
+  constructor(public stack: ContextStack, public previous?: ContextMask) {}
+  has(context: MatchSet, arg: Arg) {
+    return (
+      this.stack.has(context, arg) ||
+      (this.previous && this.previous.has(context, arg))
+    );
+  }
+  get(context: MatchSet, arg: Arg) {
+    if (this.stack.has(context, arg)) {
+      return ViewFactory.retarget(this, this.stack.get(context, arg));
+    } else if (this.previous && this.previous.has(context, arg)) {
+      return ViewFactory.retarget(this, this.previous.get(context, arg));
+    }
+    return new ArgView(this, arg);
+  }
+  set(context: MatchSet, arg: Arg, value: View) {
+    this.stack.set(context, arg, value);
+    return this;
+  }
+  delete(context: MatchSet, arg: Arg) {
+    if (this.stack.has(context, arg)) {
+      this.stack.delete(context, arg);
+    } else if (this.previous) {
+      this.previous.delete(context, arg);
+    }
+    return this;
+  }
+}
+
+export class ContextContext {}
 
 type ViewOf<T extends Expr | View> = T extends View
   ? T
