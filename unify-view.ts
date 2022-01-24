@@ -116,156 +116,7 @@ export class MatchMap implements MatchSet {
     this.map.delete(arg);
     return this;
   }
-  create() {}
-  snapshot() {}
 }
-
-export class ContextChain implements MatchSet {
-  constructor(public first: MatchSet, public second: MatchSet) {}
-  has(arg: Arg) {
-    return this.first.has(arg) || this.second.has(arg);
-  }
-  get(arg: Arg) {
-    if (this.first.has(arg)) {
-      return this.first.get(arg);
-    } else if (this.second.has(arg)) {
-      return this.second.get(arg);
-    }
-    return new ArgView(this, arg);
-  }
-  set(arg: Arg, value: View) {
-    this.second.set(arg, value);
-    return this;
-  }
-  delete(arg: Arg) {
-    this.second.delete(arg);
-    return this;
-  }
-  serialize(value: Expr | View) {
-    if (value === undefined) {
-      return { ...this.first.serialize(), ...this.second.serialize() };
-    }
-    return serialize(ViewFactory.view(this, value));
-  }
-}
-
-export class MaskedContextChain implements MatchSet {
-  constructor(public mask: Set<Arg>, public next: MatchSet) {}
-  has(arg: Arg) {
-    if (this.mask.has(arg)) {
-      return false;
-    }
-    return this.next.has(arg);
-  }
-  get(arg: Arg) {
-    if (!this.mask.has(arg) && this.next.has(arg)) {
-      return this.next.get(arg);
-    }
-    return new ArgView(this, arg);
-  }
-  set(arg: Arg, value: View): never {
-    throw new Error();
-  }
-  delete(arg: Arg) {
-    this.mask.add(arg);
-    return this;
-  }
-  serialize(value: Expr | View) {
-    if (value === undefined) {
-      throw new Error();
-    }
-    return serialize(ViewFactory.view(this, value));
-  }
-}
-
-export class ContextStack {
-  constructor(public stack: Map<MatchSet, Map<Arg, View>>) {}
-  has(context: MatchSet, arg: Arg) {
-    return this.stack.has(context) && this.stack.get(context).has(arg);
-  }
-  get(context: MatchSet, arg: Arg) {
-    if (this.has(context, arg)) {
-      return this.stack.get(context).get(arg);
-    }
-  }
-  set(context: MatchSet, arg: Arg, value: View) {
-    if (!this.stack.has(context)) {
-      this.stack.set(context, new Map());
-    }
-    this.stack.get(context).set(arg, value);
-    return this;
-  }
-  delete(context: MatchSet, arg: Arg) {
-    if (this.stack.has(context)) {
-      const item = this.stack.get(context);
-      item.delete(arg);
-      if (item.size === 0) {
-        this.stack.delete(context);
-      }
-    }
-    return this;
-  }
-}
-
-export class ContextMask {
-  constructor(
-    public mask: Map<MatchSet, Set<Arg>>,
-    public stack: ContextStack
-  ) {}
-  has(context: MatchSet, arg: Arg) {
-    if (this.mask.has(context) && this.mask.get(context).has(arg)) {
-      return false;
-    }
-    return this.stack.has(context, arg);
-  }
-  get(context: MatchSet, arg: Arg) {
-    if (this.has(context, arg)) {
-      return this.stack.get(context, arg);
-    }
-    return new ArgView(this, arg);
-  }
-  set(context: MatchSet, arg: Arg, value: View) {
-    throw new Error();
-  }
-  delete(context: MatchSet, arg: Arg) {
-    if (!this.mask.has(context)) {
-      this.mask.set(context, new Set());
-    }
-    this.mask.get(context).add(arg);
-  }
-}
-
-export class ContextSnapshot {
-  constructor(public stack: ContextStack, public previous?: ContextMask) {}
-  has(context: MatchSet, arg: Arg) {
-    return (
-      this.stack.has(context, arg) ||
-      (this.previous && this.previous.has(context, arg))
-    );
-  }
-  get(context: MatchSet, arg: Arg) {
-    if (this.stack.has(context, arg)) {
-      return ViewFactory.retarget(this, this.stack.get(context, arg));
-    } else if (this.previous && this.previous.has(context, arg)) {
-      return ViewFactory.retarget(this, this.previous.get(context, arg));
-    }
-    return new ArgView(this, arg);
-  }
-  set(context: MatchSet, arg: Arg, value: View) {
-    this.stack.set(context, arg, value);
-    return this;
-  }
-  delete(context: MatchSet, arg: Arg) {
-    if (this.stack.has(context, arg)) {
-      this.stack.delete(context, arg);
-    } else if (this.previous) {
-      this.previous.delete(context, arg);
-    }
-    return this;
-  }
-}
-
-export class ContextContext {}
 
 type ViewOf<T extends Expr | View> = T extends View
   ? T
@@ -285,6 +136,8 @@ export function serialize(value: View) {
   return value.serialize();
 }
 
+function decycle(view: View, value: any, cycleMap: Map<View, any>) {}
+
 export abstract class View {
   context: MatchSet;
   isArg(): this is ArgView {
@@ -300,7 +153,7 @@ export abstract class View {
     return false;
   }
   abstract isSame(other: View): boolean;
-  abstract serialize(): any;
+  abstract serialize(cycleMap?: Map<View, any>): any;
   abstract copyTo(context: MatchSet): View;
   abstract unify(other: View): Generator<boolean>;
 }
@@ -368,12 +221,16 @@ export class ArgView extends View {
       other.target === this.target
     );
   }
-  serialize() {
-    const value = this.get();
-    if (value.isArg()) {
-      return { debugId: value.target.debugId };
+  serialize(cycleMap = new Map()) {
+    if (!cycleMap.has(this)) {
+      const value = this.get();
+      if (value.isArg()) {
+        cycleMap.set(this, value);
+      } else {
+        cycleMap.set(this, value.serialize(cycleMap));
+      }
     }
-    return value.serialize();
+    return cycleMap.get(this);
   }
   copyTo(context: MatchSet) {
     if (this.context.has(this.target)) {
@@ -445,13 +302,22 @@ export class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
       other.start === this.start
     );
   }
-  serialize() {
-    if (this.target.length === this.start) {
-      return [];
-    } else if (this.target[this.start] instanceof RestArg) {
-      return this.rest().serialize();
+  serialize(cycleMap: Map<View, any> = new Map()) {
+    if (!cycleMap.has(this)) {
+      if (this.target.length === this.start) {
+        cycleMap.set(this, []);
+      } else if (this.target[this.start] instanceof RestArg) {
+        cycleMap.set(this, this.rest().serialize(cycleMap));
+      } else {
+        const value = [];
+        cycleMap.set(this, value);
+        value.push(
+          this.first().serialize(cycleMap),
+          ...this.rest().serialize(cycleMap)
+        );
+      }
     }
-    return [this.first().serialize(), ...this.rest().serialize()];
+    return cycleMap.get(this);
   }
   copyTo(context: MatchSet) {
     if (this.empty() && this.more()) {
@@ -576,13 +442,18 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
       other.target === this.target
     );
   }
-  serialize() {
-    return {
-      ...(this.empty()
-        ? {}
-        : { [this.firstKey()]: this.firstValue().serialize() }),
-      ...(this.more() ? this.rest().serialize() : {}),
-    };
+  serialize(cycleMap: Map<View, any> = new Map()) {
+    if (!cycleMap.has(this)) {
+      const value = {};
+      cycleMap.set(this, value);
+      Object.assign(value, {
+        ...(this.empty()
+          ? {}
+          : { [this.firstKey()]: this.firstValue().serialize(cycleMap) }),
+        ...(this.more() ? this.rest().serialize(cycleMap) : {}),
+      });
+    }
+    return cycleMap.get(this);
   }
   copyTo(context: MatchSet) {
     if (this.empty()) {
@@ -618,7 +489,7 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
     return false;
   }
   firstKey(): string {
-    return this.keys.first().serialize();
+    return (this.keys.first() as ImmutableView<string>).value;
   }
   firstValue() {
     return ViewFactory.view(this.context, this.target[this.firstKey()]);
@@ -701,6 +572,8 @@ const [
   nullArg,
   arrayArg,
   arrayArg2,
+  templateArg,
+  bagArg,
 ] = args();
 const llOps: [
   [string, ...ArrayExpr],
@@ -887,23 +760,12 @@ const llOps: [
         statement.context.get(goalArg) as ArrayView,
         facts
       )) {
-        bag.push(statement.context.get(templateArg).copyTo(new MatchMap()));
+        bag.push(statement.context.get(templateArg).serialize());
       }
       yield* _unify(
         statement.context.get(bagArg),
         ViewFactory.array(statement.context, bag, 0)
       );
-    },
-  ],
-  [
-    ["forEach", constructArg, goalArg, itemArg],
-    function* _forEach(statement, facts) {
-      const forEachContext = new MatchMap();
-      const construct = statement.context.get(constructArg);
-      if (!construct.isArray()) {
-      }
-      for (const _ of _call(statement.context.get(constructArg), facts)) {
-      }
     },
   ],
   [["is.number", numberArg], function* _numberIs(statement, facts) {}],
@@ -1028,115 +890,115 @@ function viewOf(match: MatchSet, target: Expr | View) {
 
 {
   const [_0, _1, _2, _3, _4] = args();
-  const m = new MatchMap();
-  const n = new MatchMap();
-  for (const _ of _unify(viewOf(m, [1, _0]), viewOf(n, [_1, _1, ..._2]))) {
-    console.log(
-      serialize(viewOf(m, [_0, _1, _2])),
-      serialize(viewOf(n, [_0, _1, _2]))
-    );
-  }
-  for (const _ of _unify(viewOf(m, { a: _0 }), viewOf(n, { a: 1 }))) {
-    console.log(
-      serialize(viewOf(m, [_0, _1, _2])),
-      serialize(viewOf(n, [_0, _1, _2]))
-    );
-  }
-  // for (const _ of _unify(viewOf(m, { ..._0 }), viewOf(n, { a: 1 }))) {
+  // const m = new MatchMap();
+  // const n = new MatchMap();
+  // for (const _ of _unify(viewOf(m, [1, _0]), viewOf(n, [_1, _1, ..._2]))) {
   //   console.log(
   //     serialize(viewOf(m, [_0, _1, _2])),
   //     serialize(viewOf(n, [_0, _1, _2]))
   //   );
   // }
-  // for (const _ of _unify(
-  //   viewOf(m, { a: 1, c: 3, ..._0 }),
-  //   viewOf(n, { b: 2, ..._1 })
+  // for (const _ of _unify(viewOf(m, { a: _0 }), viewOf(n, { a: 1 }))) {
+  //   console.log(
+  //     serialize(viewOf(m, [_0, _1, _2])),
+  //     serialize(viewOf(n, [_0, _1, _2]))
+  //   );
+  // }
+  // // for (const _ of _unify(viewOf(m, { ..._0 }), viewOf(n, { a: 1 }))) {
+  // //   console.log(
+  // //     serialize(viewOf(m, [_0, _1, _2])),
+  // //     serialize(viewOf(n, [_0, _1, _2]))
+  // //   );
+  // // }
+  // // for (const _ of _unify(
+  // //   viewOf(m, { a: 1, c: 3, ..._0 }),
+  // //   viewOf(n, { b: 2, ..._1 })
+  // // )) {
+  // //   console.log(
+  // //     serialize(viewOf(m, [_0, _1, _2])),
+  // //     serialize(viewOf(n, [_0, _1, _2]))
+  // //   );
+  // // }
+  // // for (const _ of _unify(
+  // //   viewOf(m, [{ a: 1, c: 3, ..._0 }, _0]),
+  // //   viewOf(n, [
+  // //     { b: 2, ..._1 },
+  // //     { d: 4, e: 5, ..._2 },
+  // //   ])
+  // // )) {
+  // //   console.log(
+  // //     serialize(viewOf(m, [_0, _1, _2])),
+  // //     serialize(viewOf(n, [_0, _1, _2]))
+  // //   );
+  // // }
+  // for (const _ of _call(
+  //   viewOf(m, [",", ["value", _0, ..._1], ["log", _0, _1]]),
+  //   new Facts().add(["value", 1]).add(["value", 2])
   // )) {
-  //   console.log(
-  //     serialize(viewOf(m, [_0, _1, _2])),
-  //     serialize(viewOf(n, [_0, _1, _2]))
-  //   );
   // }
-  // for (const _ of _unify(
-  //   viewOf(m, [{ a: 1, c: 3, ..._0 }, _0]),
-  //   viewOf(n, [
-  //     { b: 2, ..._1 },
-  //     { d: 4, e: 5, ..._2 },
-  //   ])
+  // const start = process.hrtime.bigint
+  //   ? process.hrtime.bigint()
+  //   : process.hrtime();
+  // // const startMs = Date.now();
+  // for (const _ of _call(
+  //   viewOf(m, [
+  //     ",",
+  //     [
+  //       "get",
+  //       [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
+  //       ..._0,
+  //     ],
+  //     ["true"],
+  //   ]),
+  //   new Facts().add(
+  //     ["get", [_0, ..._1], _2, _3],
+  //     [
+  //       ";",
+  //       [",", ["is", _2, 0], ["=", _3, _0]],
+  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
+  //     ]
+  //   )
   // )) {
-  //   console.log(
-  //     serialize(viewOf(m, [_0, _1, _2])),
-  //     serialize(viewOf(n, [_0, _1, _2]))
-  //   );
   // }
-  for (const _ of _call(
-    viewOf(m, [",", ["value", _0, ..._1], ["log", _0, _1]]),
-    new Facts().add(["value", 1]).add(["value", 2])
-  )) {
-  }
-  const start = process.hrtime.bigint
-    ? process.hrtime.bigint()
-    : process.hrtime();
-  // const startMs = Date.now();
-  for (const _ of _call(
-    viewOf(m, [
-      ",",
-      [
-        "get",
-        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
-        ..._0,
-      ],
-      ["true"],
-    ]),
-    new Facts().add(
-      ["get", [_0, ..._1], _2, _3],
-      [
-        ";",
-        [",", ["is", _2, 0], ["=", _3, _0]],
-        [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-      ]
-    )
-  )) {
-  }
-  console.log(
-    ((process.hrtime.bigint
-      ? process.hrtime.bigint()
-      : process.hrtime()) as any) - (start as any)
-    // Date.now() - startMs
-  );
-  for (const _ of new Facts()
-    .add(
-      ["get", [_0, ..._1], _2, _3],
-      [
-        ";",
-        [",", ["is", _2, 0], ["=", _3, _0]],
-        [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-      ]
-    )
-    .call([",", ["get", [1, 2, 3, 4], ..._0], ["log", _0]])) {
-  }
-  for (const _ of new Facts()
-    .add(
-      ["get", [_0, ..._1], _2, _3],
-      [
-        ";",
-        [",", ["is", _2, 0], ["=", _3, _0]],
-        [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-      ]
-    )
-    .call([",", ["get", [1, 2, 3, 4], _0, 2], ["log", _0]])) {
-  }
-  for (const _ of new Facts()
-    .add(
-      ["get", [_0, ..._1], _2, _3],
-      [
-        ";",
-        [",", ["is", _2, 0], ["=", _3, _0]],
-        [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-      ]
-    )
-    .call([",", ["get", [1, 2, 3, 4], 2, _0], ["log", _0]])) {
-  }
+  // console.log(
+  //   ((process.hrtime.bigint
+  //     ? process.hrtime.bigint()
+  //     : process.hrtime()) as any) - (start as any)
+  //   // Date.now() - startMs
+  // );
+  // for (const _ of new Facts()
+  //   .add(
+  //     ["get", [_0, ..._1], _2, _3],
+  //     [
+  //       ";",
+  //       [",", ["is", _2, 0], ["=", _3, _0]],
+  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
+  //     ]
+  //   )
+  //   .call([",", ["get", [1, 2, 3, 4], ..._0], ["log", _0]])) {
+  // }
+  // for (const _ of new Facts()
+  //   .add(
+  //     ["get", [_0, ..._1], _2, _3],
+  //     [
+  //       ";",
+  //       [",", ["is", _2, 0], ["=", _3, _0]],
+  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
+  //     ]
+  //   )
+  //   .call([",", ["get", [1, 2, 3, 4], _0, 2], ["log", _0]])) {
+  // }
+  // for (const _ of new Facts()
+  //   .add(
+  //     ["get", [_0, ..._1], _2, _3],
+  //     [
+  //       ";",
+  //       [",", ["is", _2, 0], ["=", _3, _0]],
+  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
+  //     ]
+  //   )
+  //   .call([",", ["get", [1, 2, 3, 4], 2, _0], ["log", _0]])) {
+  // }
   const start2 = process.hrtime.bigint();
   const a = () => new Arg();
   const [houses, drinksWater, zebraOwner, _5, _6, _7, _8, _9] = args(

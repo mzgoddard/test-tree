@@ -18,6 +18,12 @@ export class Context {
       this
     );
   }
+  swap(other: Context) {
+    const { chunk, chunkStart } = this;
+    ({ chunk: this.chunk, chunkStart: this.chunkStart } = other);
+    other.chunk = chunk;
+    other.chunkStart = chunkStart;
+  }
   has(arg: Arg) {
     return this.chunk.has(this, arg);
   }
