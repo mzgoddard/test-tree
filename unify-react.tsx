@@ -1,38 +1,54 @@
 import * as React from "react";
 
-import { args, Facts } from "./unify-view";
+import { args, Facts, ImmutableView } from "./unify-view";
 
 const [tag, props, children, component] = args();
 const [propKey, propValue, childIndex, childValue] = args();
 const [
   componentShape,
+  renderedProp,
   renderedProps,
+  propEntries,
+  renderedPropEntries,
   child,
   renderedChild,
   renderedChildren,
   tagFunc,
+  render,
 ] = args();
 
 const blockId = Symbol();
 
+class ReactView extends ImmutableView<any> {
+  serialize(cycleMap = new Map()) {
+    if (!cycleMap.has(this)) {
+      cycleMap.set(
+        this,
+        React.createElement(
+          this.value[0].serialize(cycleMap),
+          this.value[1].serialize(cycleMap),
+          this.value[2].serialize(cycleMap)
+        )
+      );
+    }
+    return cycleMap.get(this);
+  }
+}
+
 const ops = [
   [
     ["_react", [tag, props, children], component],
-    function* _html(goal) {
+    function* _react(goal) {
       yield* goal.context
         .get(component)
         .unify(
-          React.createElement(
-            goal.context.get(tag).serialize(),
-            goal.context.get(props).serialize(),
-            goal.context.get(children).serialize()
-          )
+          new ReactView(goal.context, [
+            goal.context.get(tag),
+            goal.context.get(props),
+            goal.context.get(children),
+          ])
         );
     },
-  ],
-  [
-    ["_component", [tag, props, children], component],
-    function* _component() {},
   ],
 ];
 
@@ -106,9 +122,8 @@ const facts = new Facts()
     ["render", ["html", tag, props, children], component],
     [
       ",",
-      ["render", ["html-props", props], renderedProps],
       ["render", ["tag-children", children], renderedChildren],
-      ["_react", [tag, renderedProps, renderedChildren], component],
+      ["_react", [tag, props, renderedChildren], component],
     ]
   )
   .add(
@@ -116,9 +131,31 @@ const facts = new Facts()
     [
       ",",
       ["component-tag", tag, tagFunc],
-      ["render", ["component-props", tag, props], renderedProps],
+      ["render", ["component-props", props], renderedProps],
       ["render", ["tag-children", children], renderedChildren],
       ["_react", [tagFunc, renderedProps, renderedChildren], component],
+    ]
+  )
+  .add(["render", ["component-props", []], []])
+  .add(
+    [
+      "render",
+      ["component-props", [[propKey, propValue], ...props]],
+      [[propKey, renderedProp], ...renderedProps],
+    ],
+    [
+      ",",
+      ["render", propValue, renderedProp],
+      ["render", ["component-props", props], renderedProps],
+    ]
+  )
+  .add(
+    ["render", ["component-props", props], renderedProps],
+    [
+      ",",
+      ["entries", props, propEntries],
+      ["render", ["component-props", propEntries], renderedPropEntries],
+      ["entries", renderedProps, renderedPropEntries],
     ]
   )
   .add(
@@ -126,17 +163,18 @@ const facts = new Facts()
     [",", ["isEmptyObject", props], ["type", ["tag-children", children]]]
   );
 
-function ReactUnify({
-  tag,
-  children,
-  facts: _facts = facts,
-  ...props
-}: { tag; children; facts: Facts } & { [key: string]: any }) {
-  for (const context of _facts.call([
-    ",",
-    ["component", [tag, props, children], componentShape],
-    ["render", componentShape, component],
-  ])) {
-    return context.get(component).serialize();
-  }
+const FactsMiddleware = React.createContext(new Facts());
+const useFacts = () => React.useContext(FactsMiddleware);
+
+function bindReactUnify(tag) {
+  return function ReactUnify(props: { [key: string]: any }) {
+    const facts = useFacts();
+    for (const context of facts.call([
+      ",",
+      ["render", [tag, props], render, component],
+      ["call", render],
+    ])) {
+      return context.get(component).serialize();
+    }
+  };
 }

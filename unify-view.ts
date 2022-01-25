@@ -225,7 +225,7 @@ export class ArgView extends View {
     if (!cycleMap.has(this)) {
       const value = this.get();
       if (value.isArg()) {
-        cycleMap.set(this, value);
+        cycleMap.set(this, new Arg());
       } else {
         cycleMap.set(this, value.serialize(cycleMap));
       }
@@ -428,7 +428,13 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
   constructor(
     public context: MatchSet,
     public target: V,
-    public keys = ViewFactory.array(context, Object.keys(target).sort(), 0)
+    public entries = ViewFactory.array(
+      context,
+      Object.entries(target).sort(([aKey], [bKey]) =>
+        aKey.localeCompare(bKey)
+      ) as [string, Expr][],
+      0
+    )
   ) {
     super();
   }
@@ -450,18 +456,20 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
         ...(this.empty()
           ? {}
           : { [this.firstKey()]: this.firstValue().serialize(cycleMap) }),
-        ...(this.more() ? this.rest().serialize(cycleMap) : {}),
+        ...(!this.empty() || this.more()
+          ? this.rest().serialize(cycleMap)
+          : {}),
       });
     }
     return cycleMap.get(this);
   }
   copyTo(context: MatchSet) {
     if (this.empty()) {
-      return new ObjectView(context, this.target, this.keys);
+      return new ObjectView(context, this.target, this.entries);
     }
     this.firstValue().copyTo(context);
     this.rest().copyTo(context);
-    return new ObjectView(context, this.target, this.keys);
+    return new ObjectView(context, this.target, this.entries);
   }
   *unify(other: View) {
     if (other.isArg()) {
@@ -483,19 +491,21 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
     }
   }
   empty() {
-    return this.keys.target.length === this.keys.start;
+    return this.entries.target.length === this.entries.start;
   }
   more() {
     return false;
   }
   firstKey(): string {
-    return (this.keys.first() as ImmutableView<string>).value;
+    return (
+      (this.entries.first() as ArrayView).first() as ImmutableView<string>
+    ).value;
   }
   firstValue() {
-    return ViewFactory.view(this.context, this.target[this.firstKey()]);
+    return (this.entries.first() as ArrayView<[string, Expr]>).rest().first();
   }
   rest() {
-    return new ObjectView(this.context, this.target, this.keys.rest());
+    return new ObjectView(this.context, this.target, this.entries.rest());
   }
 }
 
@@ -614,26 +624,25 @@ const llOps: [
   [
     ["assert", left],
     function* _assert(statement, facts) {
-      facts.add(serialize(statement.context.get(left)));
+      facts.add(statement.context.get(left).serialize());
       yield true;
     },
   ],
   [
     ["reject", left],
-    function* _f(statement, facts) {
+    function* _reject(statement, facts) {
       const context = new MatchMap();
-      let index = 0;
-      for (const entry of facts.facts) {
+      for (let i = 0; i < facts.facts.length; i++) {
+        const entry = facts.facts[i];
         for (const _ of _unify(
           ViewFactory.array(context, entry as any, 0),
           statement.context.get(left)
         )) {
-          facts.facts.splice(index, 1);
-          yield true;
-          return;
+          facts.facts.splice(i, 1);
+          i--;
         }
-        index++;
       }
+      yield true;
     },
   ],
   [
@@ -730,7 +739,7 @@ const llOps: [
     },
   ],
   [
-    ["forAll", constructArg, goalArg],
+    ["forall", constructArg, goalArg],
     function* _forAll(statement, facts) {
       let passed = false;
       for (const _ of _call(
@@ -830,7 +839,7 @@ const llOps: [
         while (!objectKeyView.empty()) {
           for (const _ of _unify(
             statement.context.get(keyArg),
-            objectKeyView.keys.first()
+            objectKeyView.entries.first()
           )) {
             yield* _unify(
               statement.context.get(valueArg),
@@ -847,8 +856,34 @@ const llOps: [
     function* _objectSet(statement, facts) {},
   ],
   [
-    ["object.entries", objectArg, entriesArg],
-    function* _objectEntries(statement, facts) {},
+    ["call", goalArg],
+    function* _callOp(goal, facts) {
+      yield* _call(goal.context.get(goalArg) as ArrayView, facts);
+    },
+  ],
+  [
+    ["entries", objectArg, entriesArg],
+    function* _objectEntries(goal, facts) {
+      const objectView = goal.context.get(objectArg);
+      const entriesView = goal.context.get(entriesArg);
+      if (objectView.isArg()) {
+        if (entriesView.isArray()) {
+          yield* objectView.unify(
+            new ObjectView(
+              entriesView.context,
+              {},
+              entriesView as ArrayView<[string, Expr][]>
+            )
+          );
+          return;
+        }
+        throw new Error();
+      } else if (objectView.isObject()) {
+        yield* entriesView.unify(objectView.entries);
+        return;
+      }
+      throw new Error();
+    },
   ],
 ];
 
