@@ -1,5 +1,3 @@
-import { threadId } from "worker_threads";
-
 export type Immutable = undefined | null | boolean | number | string | symbol;
 
 export type Expr =
@@ -590,28 +588,32 @@ const llOps: [
   (statement: ArrayView, facts: Facts) => Generator<boolean>
 ][] = [
   [
-    [",", left, right, ...more],
+    [","],
+    function* _commaTrue(goal, facts) {
+      yield true;
+    },
+  ],
+  [
+    [",", left, ...more],
     function* _comma(statement, facts) {
       const scope = statement.context;
       for (const _ of _call(scope.get(left) as ArrayView, facts)) {
-        const moreValue = scope.get(more);
-        if (moreValue.isArray() && !moreValue.empty()) {
-          yield* _call(
-            ViewFactory.array(scope, [",", right, ...more], 0) as ArrayView,
-            facts
-          );
-        } else {
-          yield* _call(scope.get(right) as ArrayView, facts);
-        }
+        yield* _call(ViewFactory.array(scope, [",", ...more], 0), facts);
       }
     },
   ],
   [
-    [";", left, right],
-    function* _comma(statement, facts) {
+    [";"],
+    function* _semicolonTrue(goal, facts) {
+      yield true;
+    },
+  ],
+  [
+    [";", left, ...more],
+    function* _semicolon(statement, facts) {
       const scope = statement.context;
       yield* _call(scope.get(left) as ArrayView, facts);
-      yield* _call(scope.get(right) as ArrayView, facts);
+      yield* _call(ViewFactory.array(scope, [";", ...more], 0), facts);
     },
   ],
   [
@@ -709,12 +711,12 @@ const llOps: [
     },
   ],
   [
-    ["true", ...params],
+    ["true"],
     function* _true() {
       yield true;
     },
   ],
-  [["false", ...params], function* _false() {}],
+  [["false"], function* _false() {}],
   [
     ["!", left],
     function* _not(statement, facts) {
