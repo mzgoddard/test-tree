@@ -59,13 +59,22 @@ export const TRUE = ["true"] as [string];
 
 export class Facts {
   facts = [] as { statement: Stmt; condition: Stmt }[];
+  factsByCommand = {} as {
+    [key: string]: { statement: Stmt; condition: Stmt }[];
+  };
+  constructor(public system: System) {}
   add(statement: Stmt, condition: Stmt = TRUE) {
-    this.facts.push({ statement, condition });
+    const fact = { statement, condition };
+    this.facts.push(fact);
+    if (!this.factsByCommand[statement[0]]) {
+      this.factsByCommand[statement[0]] = [];
+    }
+    this.factsByCommand[statement[0]].push(fact);
     return this;
   }
   *call(statement: [string, ...ArrayExpr]) {
     const scope = new MatchMap();
-    for (const _ of _call(ViewFactory.array(scope, statement, 0), this)) {
+    for (const _ of this.system._call(ViewFactory.array(scope, statement, 0))) {
       yield scope;
     }
   }
@@ -82,9 +91,88 @@ export interface MatchSet extends Match {
   delete(arg: Arg): this;
 }
 
+export class Pool<T = any> {
+  freeList: T[] = [];
+  allocs: number = 0;
+  free(item: T): asserts item is never {
+    // if (this.freeList.includes(item)) {
+    //   throw new Error("double free");
+    // }
+    this.freeList.push(item);
+  }
+  alloc(): T {
+    // if (this.freeList.length) {
+    //   this.allocs++;
+    // }
+    return this.freeList.pop();
+  }
+}
+
+const matchPool = new Pool<MatchMap>();
+const argViewPool = new Pool<ArgView>();
+const arrayViewPool = new Pool<ArrayView>();
+const indexArrayViewPool = new Pool<IndexArrayView>();
+const emptyArrayViewPool = new Pool<EmptyArrayView>();
+const objectViewPool = new Pool<ObjectView>();
+const autoDropPool = new Pool<AutoDrop<any>>();
+
+const DONE = { done: true } as IteratorResult<any>;
+class AutoDrop<T extends { drop(): any }> implements IterableIterator<T> {
+  step = 0;
+  value = { value: undefined, done: false } as IteratorResult<T>;
+  constructor(target: T, public pool?: Pool<AutoDrop<T>>) {
+    this.value.value = target;
+  }
+  [Symbol.iterator]() {
+    return this;
+  }
+  next() {
+    if (this.step++ === 0) {
+      return this.value;
+    }
+    if (this.step++ === 1) {
+      this._drop();
+    }
+    return DONE;
+  }
+  throw(error: Error): IteratorResult<T> {
+    this.drop();
+    throw error;
+  }
+  return() {
+    this.drop();
+    return DONE;
+  }
+  drop(): asserts this is never {
+    if (this.step === 0) {
+      this.step++;
+    }
+    if (this.step++ === 1) {
+      this._drop();
+    }
+  }
+  private _drop() {
+    this.value.value.drop();
+    if (this.pool) {
+      this.pool.free(this);
+    }
+  }
+
+  static alloc<T extends { drop(): any }>(target: T, pool = autoDropPool) {
+    return AutoDrop.init(pool.alloc(), target) || new AutoDrop(target, pool);
+  }
+  static init<T extends { drop(): any }>(autoDrop: AutoDrop<T>, target: T) {
+    if (autoDrop) {
+      autoDrop.step = 0;
+      autoDrop.value.value = target;
+    }
+    return autoDrop;
+  }
+}
+
 export class MatchMap implements MatchSet {
   map = new Map();
-  constructor() {}
+  constructor(public pool?: Pool<MatchMap>) {}
   has(arg: Arg): boolean {
     return this.map.has(arg);
   }
@@ -108,11 +196,32 @@ export class MatchMap implements MatchSet {
   }
   set(arg: Arg, value: View) {
     this.map.set(arg, value);
+    if (value.pool !== undefined) {
+      value.pool = undefined;
+    }
     return this;
   }
   delete(arg: Arg) {
     this.map.delete(arg);
     return this;
+  }
+  drop(): asserts this is never {
+    if (this.pool) {
+      this.pool.free(this);
+    }
+  }
+  *autoDrop() {
+    try {
+      yield this;
+    } finally {
+      this.drop();
+    }
+  }
+  static alloc(pool = matchPool) {
+    return MatchMap.init(pool.alloc()) || new MatchMap(pool);
+  }
+  static init(matchMap: MatchMap) {
+    return matchMap;
   }
 }
 
@@ -138,6 +247,7 @@ function decycle(view: View, value: any, cycleMap: Map<View, any>) {}
 
 export abstract class View {
   context: MatchSet;
+  pool?: Pool;
   isArg(): this is ArgView {
     return false;
   }
@@ -154,12 +264,25 @@ export abstract class View {
   abstract serialize(cycleMap?: Map<View, any>): any;
   abstract copyTo(context: MatchSet): View;
   abstract unify(other: View): Generator<boolean>;
+  drop(): asserts this is never {
+    if (this.pool !== undefined) {
+      this.pool.free(this);
+    }
+  }
+  *autoDrop() {
+    try {
+      yield this;
+    } finally {
+      this.drop();
+    }
+  }
 }
+
 export class ViewFactory {
-  static view<T extends Expr | View, R extends View = ViewOf<T>>(
-    match: MatchSet,
-    target: T
-  ): R;
+  // static view<T extends Expr | View, R extends View = ViewOf<T>>(
+  //   match: MatchSet,
+  //   target: T
+  // ): R;
   static view(match: MatchSet, target: Expr | View): View {
     if (target instanceof View) {
       return target;
@@ -184,7 +307,7 @@ export class ViewFactory {
         return view.get();
       }
     }
-    return new ArgView(match, target);
+    return ArgView.alloc(match, target);
   }
   static array<T extends [Expr, ...ArrayExpr]>(
     match: MatchSet,
@@ -198,15 +321,19 @@ export class ViewFactory {
   ): R;
   static array<T extends ArrayExpr>(match: MatchSet, target: T, index: number) {
     if (target.length === index) {
-      return new EmptyArrayView(match, target, index);
+      return EmptyArrayView.alloc(match, target, index);
     } else if (target[index] instanceof RestArg) {
       return ViewFactory.arg(match, (target[index] as RestArg).arg);
     }
-    return new IndexArrayView(match, target, index);
+    return IndexArrayView.alloc(match, target, index);
   }
 }
 export class ArgView extends View {
-  constructor(public context: MatchSet, public target: Arg) {
+  constructor(
+    public context: MatchSet,
+    public target: Arg,
+    public pool?: Pool<ArgView>
+  ) {
     super();
   }
   isArg(): this is ArgView {
@@ -237,11 +364,7 @@ export class ArgView extends View {
     return new ArgView(context, this.target);
   }
   *unify(other: View): Generator<boolean> {
-    if (
-      other.isArg() &&
-      other.context === this.context &&
-      other.target === this.target
-    ) {
+    if (this.isSame(other)) {
       yield true;
     } else if (this.bound()) {
       yield* this.get().unify(other);
@@ -279,13 +402,27 @@ export class ArgView extends View {
       this.delete();
     }
   }
+  static alloc(context: MatchSet, target: Arg, pool = argViewPool) {
+    return (
+      ArgView.init(pool.alloc(), context, target) ||
+      new ArgView(context, target, pool)
+    );
+  }
+  static init(view: ArgView, context: MatchSet, target: Arg) {
+    if (view) {
+      view.context = context;
+      view.target = target;
+    }
+    return view;
+  }
 }
 
 export class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
   constructor(
     public context: MatchSet,
     public target: T,
-    public start: number
+    public start: number,
+    public pool?: Pool<ArrayView>
   ) {
     super();
   }
@@ -364,6 +501,30 @@ export class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
   rest() {
     return ViewFactory.array(this.context, this.target, this.start + 1);
   }
+  static alloc<T extends ArrayExpr>(
+    context: MatchSet,
+    target: T,
+    index: number,
+    pool = arrayViewPool
+  ) {
+    return (
+      ArrayView.init(pool.alloc(), context, target, index) ||
+      new ArrayView(context, target, index, pool)
+    );
+  }
+  static init<T extends ArrayExpr>(
+    view: ArrayView<T>,
+    context: MatchSet,
+    target: T,
+    index: number
+  ) {
+    if (view) {
+      view.context = context;
+      view.target = target;
+      view.start = index;
+    }
+    return view;
+  }
 }
 
 export class IndexArrayView<
@@ -376,11 +537,16 @@ export class IndexArrayView<
       yield true;
     } else if (other.isArray()) {
       if (!other.empty()) {
-        for (const _ of this.first().unify(other.first())) {
-          yield* this.rest().unify(other.rest());
+        const thisFirst = this.first();
+        const otherFirst = other.first();
+        for (const _ of thisFirst.unify(otherFirst)) {
+          const thisRest = this.rest();
+          const otherRest = other.rest();
+          yield* thisRest.unify(otherRest);
         }
       } else if (other.empty() && other.more()) {
-        yield* this.unify(other.rest());
+        const otherRest = other.rest();
+        yield* this.unify(otherRest);
       }
     }
   }
@@ -389,6 +555,30 @@ export class IndexArrayView<
   }
   more() {
     return true;
+  }
+  static alloc<T extends ArrayExpr>(
+    context: MatchSet,
+    target: T,
+    start: number,
+    pool = indexArrayViewPool
+  ) {
+    if (pool.freeList.length > 0) {
+      return IndexArrayView.init(pool.alloc(), context, target, start);
+    }
+    return new IndexArrayView(context, target, start, pool);
+  }
+  static init<T extends ArrayExpr>(
+    view: IndexArrayView<T>,
+    context: MatchSet,
+    target: T,
+    start: number
+  ) {
+    if (view) {
+      view.context = context;
+      view.target = target;
+      view.start = start;
+    }
+    return view;
   }
 }
 
@@ -417,8 +607,29 @@ export class EmptyArrayView<
   more() {
     return false;
   }
-  rest() {
-    return this;
+  static alloc<T extends ArrayExpr>(
+    context: MatchSet,
+    target: T,
+    start: number,
+    pool = emptyArrayViewPool
+  ) {
+    return (
+      EmptyArrayView.init(pool.alloc(), context, target, start) ||
+      new EmptyArrayView(context, target, start, pool)
+    );
+  }
+  static init<T extends ArrayExpr>(
+    view: EmptyArrayView<T>,
+    context: MatchSet,
+    target: T,
+    start: number
+  ) {
+    if (view) {
+      view.context = context;
+      view.target = target;
+      view.start = start;
+    }
+    return view;
   }
 }
 
@@ -583,64 +794,69 @@ const [
   templateArg,
   bagArg,
 ] = args();
+const commaMoreGoal = [",", ...more];
 const llOps: [
-  [string, ...ArrayExpr],
-  (statement: ArrayView, facts: Facts) => Generator<boolean>
+  Stmt,
+  (statement: ArrayView, system: System) => Generator<boolean>
 ][] = [
   [
-    [","],
-    function* _commaTrue(goal, facts) {
-      yield true;
-    },
-  ],
-  [
     [",", left, ...more],
-    function* _comma(statement, facts) {
+    function* _comma(statement, system) {
       const scope = statement.context;
-      for (const _ of _call(scope.get(left) as ArrayView, facts)) {
-        yield* _call(ViewFactory.array(scope, [",", ...more], 0), facts);
+      for (const _ of system._call(scope.get(left) as ArrayView)) {
+        const moreGoalView = ViewFactory.array(
+          scope,
+          commaMoreGoal,
+          0
+        ) as ArrayView;
+        yield* system._call(moreGoalView);
       }
     },
   ],
   [
-    [";"],
-    function* _semicolonTrue(goal, facts) {
+    [","],
+    function* _commaTrue(goal, system) {
       yield true;
     },
   ],
   [
     [";", left, ...more],
-    function* _semicolon(statement, facts) {
+    function* _semicolon(statement, system) {
       const scope = statement.context;
-      yield* _call(scope.get(left) as ArrayView, facts);
-      yield* _call(ViewFactory.array(scope, [";", ...more], 0), facts);
+      yield* system._call(scope.get(left) as ArrayView);
+      yield* system._call(ViewFactory.array(scope, [";", ...more], 0));
+    },
+  ],
+  [
+    [";"],
+    function* _semicolonTrue(goal, system) {
+      yield true;
     },
   ],
   [
     ["=", left, right],
-    function* _assign(statement, facts) {
+    function* _assign(statement, system) {
       const scope = statement.context;
-      yield* _unify(scope.get(left), scope.get(right));
+      yield* scope.get(left).unify(scope.get(right));
     },
   ],
   [
     ["assert", left],
-    function* _assert(statement, facts) {
-      facts.add(statement.context.get(left).serialize());
+    function* _assert(statement, system) {
+      system.facts.add(statement.context.get(left).serialize());
       yield true;
     },
   ],
   [
     ["reject", left],
-    function* _reject(statement, facts) {
+    function* _reject(statement, system) {
       const context = new MatchMap();
-      for (let i = 0; i < facts.facts.length; i++) {
-        const entry = facts.facts[i];
-        for (const _ of _unify(
-          ViewFactory.array(context, entry as any, 0),
+      for (let i = 0; i < system.facts.facts.length; i++) {
+        const entry = system.facts.facts[i];
+        for (const _ of ViewFactory.array(context, entry as any, 0).unify(
           statement.context.get(left)
         )) {
-          facts.facts.splice(i, 1);
+          system.facts.facts.splice(i, 1);
           i--;
         }
       }
@@ -649,7 +865,7 @@ const llOps: [
   ],
   [
     ["is", left, right],
-    function* _settle(statement, facts) {
+    function* _settle(statement, system) {
       const scope = statement.context;
       let leftFormula = scope.get(left);
       if (leftFormula.isArg()) {
@@ -665,19 +881,17 @@ const llOps: [
       const rightValue = rightFormula.isArray()
         ? new ImmutableView(rightFormula.context, calc(serialize(rightFormula)))
         : rightFormula;
-      yield* _unify(leftValue, rightValue);
+      yield* leftValue.unify(rightValue);
     },
   ],
   [
     ["<", left, right],
-    function* _lt(statement, facts) {
-      for (const _ of _call(
-        ViewFactory.array(statement.context, ["is", left2, left], 0),
-        facts
+    function* _lt(statement, system) {
+      for (const _ of system._call(
+        ViewFactory.array(statement.context, ["is", left2, left], 0)
       )) {
-        for (const _ of _call(
-          ViewFactory.array(statement.context, ["is", right2, right], 0),
-          facts
+        for (const _ of system._call(
+          ViewFactory.array(statement.context, ["is", right2, right], 0)
         )) {
           if (
             statement.context.get(left2).serialize() <
@@ -691,14 +905,12 @@ const llOps: [
   ],
   [
     [">", left, right],
-    function* _lt(statement, facts) {
-      for (const _ of _call(
-        ViewFactory.array(statement.context, ["is", left2, left], 0),
-        facts
+    function* _lt(statement, system) {
+      for (const _ of system._call(
+        ViewFactory.array(statement.context, ["is", left2, left], 0)
       )) {
-        for (const _ of _call(
-          ViewFactory.array(statement.context, ["is", right2, right], 0),
-          facts
+        for (const _ of system._call(
+          ViewFactory.array(statement.context, ["is", right2, right], 0)
         )) {
           if (
             statement.context.get(left2).serialize() >
@@ -719,8 +931,8 @@ const llOps: [
   [["false"], function* _false() {}],
   [
     ["!", left],
-    function* _not(statement, facts) {
-      for (const _ of _call(statement.context.get(left) as ArrayView, facts)) {
+    function* _not(statement, system) {
+      for (const _ of system._call(statement.context.get(left) as ArrayView)) {
         return;
       }
       yield true;
@@ -742,16 +954,14 @@ const llOps: [
   ],
   [
     ["forall", constructArg, goalArg],
-    function* _forAll(statement, facts) {
+    function* _forAll(statement, system) {
       let passed = false;
-      for (const _ of _call(
-        statement.context.get(constructArg) as ArrayView,
-        facts
+      for (const _ of system._call(
+        statement.context.get(constructArg) as ArrayView
       )) {
         passed = false;
-        for (const _ of _call(
-          statement.context.get(goalArg) as ArrayView,
-          facts
+        for (const _ of system._call(
+          statement.context.get(goalArg) as ArrayView
         )) {
           passed = true;
           break;
@@ -765,67 +975,65 @@ const llOps: [
   ],
   [
     ["findall", templateArg, goalArg, bagArg],
-    function* _findall(statement, facts) {
+    function* _findall(statement, system) {
       const bag = [];
-      for (const _ of _call(
-        statement.context.get(goalArg) as ArrayView,
-        facts
+      for (const _ of system._call(
+        statement.context.get(goalArg) as ArrayView
       )) {
         bag.push(statement.context.get(templateArg).serialize());
       }
-      yield* _unify(
-        statement.context.get(bagArg),
-        ViewFactory.array(statement.context, bag, 0)
-      );
+      yield* statement.context
+        .get(bagArg)
+        .unify(ViewFactory.array(statement.context, bag, 0));
     },
   ],
-  [["is.number", numberArg], function* _numberIs(statement, facts) {}],
-  [["is.bigint", numberArg], function* _bigintIs(statement, facts) {}],
-  [["is.string", stringArg], function* _stringIs(statement, facts) {}],
-  [["is.boolean", booleanArg], function* _booleanIs(statement, facts) {}],
-  [["is.null", nullArg], function* _nullIs(statement, facts) {}],
-  [["is.array", arrayArg], function* _arrayIs(statement, facts) {}],
-  [["is.object", objectArg], function* _objectIs(statement, facts) {}],
+  [["is.number", numberArg], function* _numberIs(statement, system) {}],
+  [["is.bigint", numberArg], function* _bigintIs(statement, system) {}],
+  [["is.string", stringArg], function* _stringIs(statement, system) {}],
+  [["is.boolean", booleanArg], function* _booleanIs(statement, system) {}],
+  [["is.null", nullArg], function* _nullIs(statement, system) {}],
+  [["is.array", arrayArg], function* _arrayIs(statement, system) {}],
+  [["is.object", objectArg], function* _objectIs(statement, system) {}],
   [
     ["array.get", arrayArg, keyArg, valueArg],
-    function* _arrayGet(statement, facts) {
+    function* _arrayGet(statement, system) {
       const arrayView = statement.context.get(arrayArg);
       if (arrayView.isArray()) {
         let i = 0;
         let arrayViewIterator = arrayView;
         while (!arrayViewIterator.empty()) {
-          for (const _ of _unify(
-            ViewFactory.view(statement.context, i),
+          for (const _ of ViewFactory.view(statement.context, i).unify(
             statement.context.get(keyArg)
           )) {
-            yield* _unify(
-              arrayViewIterator.first(),
-              statement.context.get(valueArg)
-            );
+            yield* arrayViewIterator
+              .first()
+              .unify(statement.context.get(valueArg));
           }
 
           i++;
           arrayViewIterator = arrayViewIterator.rest();
         }
         if (arrayViewIterator.more()) {
-          for (const _ of _unify(
-            statement.context.get(arrayArg2),
-            arrayViewIterator
-          )) {
-            for (const _ of _call(
+          for (const _ of statement.context
+            .get(arrayArg2)
+            .unify(arrayViewIterator)) {
+            for (const _ of system._call(
               ViewFactory.view(statement.context, [
                 "array.get",
                 arrayArg2,
                 keyArg2,
                 valueArg,
-              ]),
-              facts
+              ]) as ArrayView
             )) {
               const keyArg2View = statement.context.get(keyArg2);
-              yield* _unify(
-                statement.context.get(keyArg),
-                ViewFactory.view(statement.context, keyArg2View.serialize() + i)
-              );
+              yield* statement.context
+                .get(keyArg)
+                .unify(
+                  ViewFactory.view(
+                    statement.context,
+                    keyArg2View.serialize() + i
+                  )
+                );
             }
           }
         }
@@ -834,19 +1042,17 @@ const llOps: [
   ],
   [
     ["object.get", objectArg, keyArg, valueArg],
-    function* _objectGet(statement, facts) {
+    function* _objectGet(statement, system) {
       const objectView = statement.context.get(objectArg);
       if (objectView.isObject()) {
         let objectKeyView = objectView;
         while (!objectKeyView.empty()) {
-          for (const _ of _unify(
-            statement.context.get(keyArg),
-            objectKeyView.entries.first()
-          )) {
-            yield* _unify(
-              statement.context.get(valueArg),
-              objectKeyView.firstValue()
-            );
+          for (const _ of statement.context
+            .get(keyArg)
+            .unify(objectKeyView.entries.first())) {
+            yield* statement.context
+              .get(valueArg)
+              .unify(objectKeyView.firstValue());
           }
           objectKeyView = objectKeyView.rest();
         }
@@ -855,17 +1061,17 @@ const llOps: [
   ],
   [
     ["object.set", objectArg, keyArg, valueArg, newObjectArg],
-    function* _objectSet(statement, facts) {},
+    function* _objectSet(statement, system) {},
   ],
   [
     ["call", goalArg],
-    function* _callOp(goal, facts) {
-      yield* _call(goal.context.get(goalArg) as ArrayView, facts);
+    function* _callOp(goal, system) {
+      yield* system._call(goal.context.get(goalArg) as ArrayView);
     },
   ],
   [
     ["entries", objectArg, entriesArg],
-    function* _objectEntries(goal, facts) {
+    function* _objectEntries(goal, system) {
       const objectView = goal.context.get(objectArg);
       const entriesView = goal.context.get(entriesArg);
       if (objectView.isArg()) {
@@ -889,41 +1095,117 @@ const llOps: [
   ],
 ];
 
-export function* _call(statement: ArrayView, facts: Facts) {
-  const scope = new MatchMap();
-  {
-    for (const [llOp, llAction] of llOps) {
-      const llOpView = ViewFactory.array(scope, llOp, 0);
-      for (const _ of _unify(llOpView, statement)) {
-        yield* llAction(llOpView, facts);
-        return;
-      }
-    }
+type Operation = [
+  [string, ...ArrayExpr],
+  (goal: ArrayView<Stmt>, system: System) => Generator<boolean>
+];
 
-    try {
-      for (const fact of facts.facts) {
-        for (const _ of _unify(
-          ViewFactory.array(scope, fact.statement, 0),
-          statement
-        )) {
-          yield* _call(ViewFactory.array(scope, fact.condition, 0), facts);
+interface UnifyOps {
+  [Symbol.iterator](): Iterator<Operation>;
+}
+
+const [command] = args();
+const getCommandGoal = [command, ...more];
+
+const commandContext = new MatchMap();
+function _getCommandName(goal: ArrayView) {
+  if (!goal.empty()) {
+    const commandNameView = goal.first();
+    if (commandNameView.isImmutable()) {
+      return commandNameView.serialize();
+    }
+  }
+  for (const _ of ViewFactory.array(commandContext, getCommandGoal, 0).unify(
+    goal
+  )) {
+    return commandContext.get(command).serialize();
+  }
+}
+
+class SystemOps implements UnifyOps {
+  ops = [] as Operation[];
+  opsByCommand = {} as { [key: string]: Operation[] };
+  constructor(public system?: System, initialOps: Operation[] = llOps) {
+    for (const op of initialOps) {
+      this.add(...op);
+    }
+  }
+  add(...operation: Operation) {
+    const [goal] = operation;
+    const [command] = goal;
+    this.ops.push(operation);
+    if (!this.opsByCommand[command]) {
+      this.opsByCommand[command] = [];
+    }
+    this.opsByCommand[command].push(operation);
+  }
+  *_call(goal: ArrayView) {
+    const commandName = _getCommandName(goal);
+    const opsForCommand = this.opsByCommand[commandName];
+    if (opsForCommand) {
+      for (const scope of MatchMap.alloc().autoDrop()) {
+        for (const [llOp, llAction] of opsForCommand) {
+          const llOpView = ViewFactory.array(scope, llOp, 0);
+          for (const _ of llOpView.unify(goal)) {
+            yield* llAction(llOpView, this.system);
+            return;
+          }
         }
       }
-    } catch (err) {
-      if (err instanceof CutError) {
-        return;
+    }
+  }
+  *[Symbol.iterator]() {
+    yield* this.ops;
+  }
+}
+
+export class System {
+  ops: SystemOps = new SystemOps(this);
+  facts: Facts = new Facts(this);
+  *call(goal: Stmt) {
+    const context = new MatchMap();
+    for (const _ of this._call(ViewFactory.array(context, goal, 0))) {
+      yield context;
+    }
+  }
+  *_call(goal: ArrayView) {
+    let isOp = false;
+    for (const _ of this.ops._call(goal)) {
+      isOp = true;
+      yield true;
+    }
+    if (isOp) {
+      return;
+    }
+
+    for (const scope of MatchMap.alloc().autoDrop()) {
+      try {
+        const factName = _getCommandName(goal);
+        const factsForCommand = this.facts.factsByCommand[factName];
+        if (factsForCommand) {
+          for (const fact of factsForCommand) {
+            const factGoal = ViewFactory.array(scope, fact.statement, 0);
+            for (const _ of factGoal.unify(goal)) {
+              const factCondition = ViewFactory.array(scope, fact.condition, 0);
+              yield* this._call(factCondition);
+            }
+          }
+        }
+      } catch (err) {
+        if (err instanceof CutError) {
+          return;
+        }
+        throw err;
       }
-      throw err;
     }
   }
 }
 
+const defaultSystem = new System();
+export const _call = defaultSystem._call.bind(defaultSystem);
 export const call = _call;
 
-function viewOf<T extends Expr | View>(match: MatchSet, target: T): ViewOf<T>;
-function viewOf(match: MatchSet, target: Expr | View) {
-  return ViewFactory.view(match, target);
-}
+const viewOf = ViewFactory.view;
 
 {
   const [_0, _1, _2, _3, _4] = args();
@@ -1043,7 +1325,7 @@ function viewOf(match: MatchSet, target: Expr | View) {
     "drinksWater",
     "zebraOwner"
   );
-  for (const _ of new Facts()
+  for (const _ of new System().facts
     .add(["house", _0, [_0, _1, _2, _3, _4]])
     .add(["house", _0, [_1, _0, _2, _3, _4]])
     .add(["house", _0, [_1, _2, _0, _3, _4]])
@@ -1117,5 +1399,20 @@ function viewOf(match: MatchSet, target: Expr | View) {
     ])) {
     console.log(process.hrtime.bigint() - start2);
     console.log(_.serialize());
+    break;
   }
+  console.log(
+    autoDropPool.allocs,
+    autoDropPool.freeList.length,
+    matchPool.allocs,
+    matchPool.freeList.length,
+    argViewPool.allocs,
+    argViewPool.freeList.length,
+    arrayViewPool.allocs,
+    arrayViewPool.freeList.length,
+    indexArrayViewPool.allocs,
+    indexArrayViewPool.freeList.length,
+    emptyArrayViewPool.allocs,
+    emptyArrayViewPool.freeList.length
+  );
 }

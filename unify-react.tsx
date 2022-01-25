@@ -166,7 +166,7 @@ const facts = new Facts()
 const FactsMiddleware = React.createContext(new Facts());
 const useFacts = () => React.useContext(FactsMiddleware);
 
-function bindReactUnify(tag) {
+export function bindReactUnify(tag) {
   return function ReactUnify(props: { [key: string]: any }) {
     const facts = useFacts();
     for (const context of facts.call([
