@@ -1,4 +1,13 @@
-export type Immutable = undefined | null | boolean | number | string | symbol;
+import { build } from "esbuild";
+
+export type Immutable =
+  | undefined
+  | null
+  | boolean
+  | number
+  | string
+  | symbol
+  | ((...args: any) => any);
 
 export type Expr =
   | Immutable
@@ -43,6 +52,9 @@ export class Arg {
 
 export class RestArg {
   constructor(public arg: Arg) {}
+  toJSON() {
+    return `RestArg(${this.arg.toJSON()})`;
+  }
 }
 
 const MAX_NEW_ARGS = 32;
@@ -57,14 +69,72 @@ export function* args(...ids: any[]) {
 
 export const TRUE = ["true"] as [string];
 
+export function replaceArgs(expr: Expr, args: [Arg, Arg][] = []) {
+  if (typeof expr === "object") {
+    if (expr === null) {
+      return expr;
+    } else if (expr instanceof Arg) {
+      if (args.some(([oldArg]) => expr === oldArg)) {
+        return args.find(([oldArg]) => expr === oldArg)[1];
+      }
+      if (expr.id > -1) {
+        if (args[expr.id] && args[expr.id][0] !== expr) {
+          throw new Error(
+            `existing arg ${expr.id}: ${JSON.stringify(args[expr.id])}, ${
+              args[expr.id][0] === expr
+            }`
+          );
+        }
+        args[expr.id] = [expr, expr];
+        return expr;
+      }
+      let index = args.indexOf(undefined);
+      if (index === -1) {
+        index = args.length;
+      }
+      args[index] = [expr, new Arg(args.length, expr.debugId)];
+      return args[index][1];
+    } else if (Array.isArray(expr)) {
+      return expr.map((subExpr) =>
+        subExpr instanceof RestArg
+          ? new RestArg(replaceArgs(subExpr.arg, args))
+          : replaceArgs(subExpr, args)
+      );
+    }
+    return Object.entries(expr).reduce((carry, [key, subExpr]) => {
+      carry[key] = replaceArgs(subExpr, args);
+      return carry;
+    }, {});
+  }
+  return expr;
+}
+
+interface FactInfo {
+  statement: Stmt;
+  condition: Stmt;
+  args: Arg[];
+}
+
+export function buildFact({ statement, condition }): FactInfo {
+  const args = [] as [Arg, Arg][];
+  try {
+    statement = replaceArgs(statement, args);
+    condition = replaceArgs(condition, args);
+  } catch (error) {
+    error.message += `, ${JSON.stringify(statement)}`;
+    throw error;
+  }
+  return { statement, condition, args: args.map(([, newArg]) => newArg) };
+}
+
 export class Facts {
-  facts = [] as { statement: Stmt; condition: Stmt }[];
+  facts = [] as FactInfo[];
   factsByCommand = {} as {
-    [key: string]: { statement: Stmt; condition: Stmt }[];
+    [key: string]: FactInfo[];
   };
-  constructor(public system: System) {}
+  constructor(public system?: System) {}
   add(statement: Stmt, condition: Stmt = TRUE) {
-    const fact = { statement, condition };
+    const fact = buildFact({ statement, condition });
     this.facts.push(fact);
     if (!this.factsByCommand[statement[0]]) {
       this.factsByCommand[statement[0]] = [];
@@ -108,13 +178,13 @@ export class Pool<T = any> {
   }
 }
 
-const matchPool = new Pool<MatchMap>();
-const argViewPool = new Pool<ArgView>();
-const arrayViewPool = new Pool<ArrayView>();
-const indexArrayViewPool = new Pool<IndexArrayView>();
-const emptyArrayViewPool = new Pool<EmptyArrayView>();
+export const matchPool = new Pool<MatchMap>();
+export const argViewPool = new Pool<ArgView>();
+export const arrayViewPool = new Pool<ArrayView>();
+export const indexArrayViewPool = new Pool<IndexArrayView>();
+export const emptyArrayViewPool = new Pool<EmptyArrayView>();
 const objectViewPool = new Pool<ObjectView>();
-const autoDropPool = new Pool<AutoDrop<any>>();
+export const autoDropPool = new Pool<AutoDrop<any>>();
 
 const DONE = { done: true } as IteratorResult<any>;
 class AutoDrop<T extends { drop(): any }> implements IterableIterator<T> {
@@ -167,6 +237,51 @@ class AutoDrop<T extends { drop(): any }> implements IterableIterator<T> {
       autoDrop.value.value = target;
     }
     return autoDrop;
+  }
+}
+
+interface ContextInfo {
+  args: Arg[];
+}
+
+export class MatchFixedArray implements MatchSet {
+  info: ContextInfo;
+  data: View[] = [];
+  constructor(info?: ContextInfo) {
+    if (info) {
+      this.setInfo(info);
+    }
+  }
+  setInfo(info: ContextInfo) {
+    this.info = info;
+    this.data.length = 0;
+    this.data.length = info.args.length;
+  }
+  has(arg: Arg) {
+    return this.data[arg.id] !== undefined;
+  }
+  get(arg: Arg) {
+    if (!this.has(arg)) {
+      return ViewFactory.arg(this, arg);
+    }
+    return this.data[arg.id];
+  }
+  set(arg: Arg, view: View) {
+    this.data[arg.id] = view;
+    return this;
+  }
+  delete(arg: Arg) {
+    this.data[arg.id] = undefined;
+    return this;
+  }
+  serialize(expr: Expr | View) {
+    if (expr === undefined) {
+      return this.data.reduce((carry, value, index) => {
+        carry[this.info.args[index].debugId || `_${index}`] = value.serialize();
+        return carry;
+      }, {});
+    }
+    return ViewFactory.view(this, expr).serialize();
   }
 }
 
@@ -773,27 +888,41 @@ function calc(formula) {
   }
 }
 
-const [params, left, right, more] = args();
+export function* take(iter: Iterable<any>, count: number) {
+  if (count === 0) {
+    return;
+  }
+  for (const item of iter) {
+    yield item;
+    if (--count === 0) {
+      return;
+    }
+  }
+}
+
+const [params, more] = replaceArgs(Array.from(take(args(), 2)), []);
+console.log(params, more);
+const [left, right] = replaceArgs(Array.from(take(args(), 2)), []);
+console.log(left, right);
 const [left2, right2] = args();
-const [
-  constructArg,
-  goalArg,
-  itemArg,
-  numberArg,
-  objectArg,
-  keyArg,
-  keyArg2,
-  valueArg,
-  newObjectArg,
-  entriesArg,
-  stringArg,
-  booleanArg,
-  nullArg,
-  arrayArg,
-  arrayArg2,
-  templateArg,
-  bagArg,
-] = args();
+const [templateArg, goalArg, bagArg] = replaceArgs(
+  Array.from(take(args(), 4)),
+  []
+);
+const [numberArg] = replaceArgs(Array.from(take(args(), 4)), []);
+const [objectArg, entriesArg, __0, newObjectArg] = replaceArgs(
+  Array.from(take(args(), 4)),
+  []
+);
+const [stringArg] = replaceArgs(Array.from(take(args(), 4)), []);
+const [booleanArg] = replaceArgs(Array.from(take(args(), 4)), []);
+const [nullArg] = replaceArgs(Array.from(take(args(), 4)), []);
+const [arrayArg, keyArg, valueArg, arrayArg2] = replaceArgs(
+  Array.from(take(args(), 4)),
+  []
+);
+const [constructArg] = replaceArgs(Array.from(take(args(), 4)), []);
+const [keyArg2] = args();
 const commaMoreGoal = [",", ...more];
 const llOps: [
   Stmt,
@@ -987,13 +1116,21 @@ const llOps: [
         .unify(ViewFactory.array(statement.context, bag, 0));
     },
   ],
-  [["is.number", numberArg], function* _numberIs(statement, system) {}],
-  [["is.bigint", numberArg], function* _bigintIs(statement, system) {}],
-  [["is.string", stringArg], function* _stringIs(statement, system) {}],
-  [["is.boolean", booleanArg], function* _booleanIs(statement, system) {}],
-  [["is.null", nullArg], function* _nullIs(statement, system) {}],
-  [["is.array", arrayArg], function* _arrayIs(statement, system) {}],
-  [["is.object", objectArg], function* _objectIs(statement, system) {}],
+  [["isNumber", numberArg], function* _numberIs(statement, system) {}],
+  [["isBigInt", numberArg], function* _bigintIs(statement, system) {}],
+  [
+    ["isString", stringArg],
+    function* _stringIs(statement, system) {
+      const stringView = statement.context.get(stringArg);
+      if (stringView.isImmutable() && typeof stringView.value === "string") {
+        yield true;
+      }
+    },
+  ],
+  [["isBoolean", booleanArg], function* _booleanIs(statement, system) {}],
+  [["isNull", nullArg], function* _nullIs(statement, system) {}],
+  [["isArray", arrayArg], function* _arrayIs(statement, system) {}],
+  [["isObject", objectArg], function* _objectIs(statement, system) {}],
   [
     ["array.get", arrayArg, keyArg, valueArg],
     function* _arrayGet(statement, system) {
@@ -1041,7 +1178,7 @@ const llOps: [
     },
   ],
   [
-    ["object.get", objectArg, keyArg, valueArg],
+    ["get", objectArg, keyArg, valueArg],
     function* _objectGet(statement, system) {
       const objectView = statement.context.get(objectArg);
       if (objectView.isObject()) {
@@ -1055,6 +1192,18 @@ const llOps: [
               .unify(objectKeyView.firstValue());
           }
           objectKeyView = objectKeyView.rest();
+        }
+      } else if (objectView.isArray()) {
+        let i = 0;
+        let arrayView = objectView;
+        while (!arrayView.empty()) {
+          for (const _ of statement.context
+            .get(keyArg)
+            .unify(ViewFactory.view(statement.context, i))) {
+            yield* statement.context.get(valueArg).unify(arrayView.first());
+          }
+          i++;
+          arrayView = arrayView.rest();
         }
       }
     },
@@ -1101,15 +1250,19 @@ type Operation = [
 ];
 
 interface UnifyOps {
-  [Symbol.iterator](): Iterator<Operation>;
+  [Symbol.iterator](): Iterator<OpInfo>;
 }
 
-const [command] = args();
-const getCommandGoal = [command, ...more];
+const [command] = replaceArgs(Array.from(take(args(), 1)), []);
+const getCommandArgs = [];
+const getCommandGoal = replaceArgs([command, ...more], getCommandArgs);
+const getCommandInfo = {
+  args: getCommandArgs.map(([, newArg]) => newArg),
+};
 
-const commandContext = new MatchMap();
+const commandContext = new MatchFixedArray(getCommandInfo);
 function _getCommandName(goal: ArrayView) {
-  if (!goal.empty()) {
+  if (goal.isArray() && !goal.empty()) {
     const commandNameView = goal.first();
     if (commandNameView.isImmutable()) {
       return commandNameView.serialize();
@@ -1122,9 +1275,15 @@ function _getCommandName(goal: ArrayView) {
   }
 }
 
+interface OpInfo {
+  statement: Stmt;
+  action: (goal: ArrayView, system: System) => Generator<boolean>;
+  args: Arg[];
+}
+
 class SystemOps implements UnifyOps {
-  ops = [] as Operation[];
-  opsByCommand = {} as { [key: string]: Operation[] };
+  ops = [] as OpInfo[];
+  opsByCommand = {} as { [key: string]: OpInfo[] };
   constructor(public system?: System, initialOps: Operation[] = llOps) {
     for (const op of initialOps) {
       this.add(...op);
@@ -1133,18 +1292,23 @@ class SystemOps implements UnifyOps {
   add(...operation: Operation) {
     const [goal] = operation;
     const [command] = goal;
-    this.ops.push(operation);
+    const { statement, args } = buildFact({ statement: goal, condition: TRUE });
+    const info = { statement, action: operation[1], args };
+    this.ops.push(info);
     if (!this.opsByCommand[command]) {
       this.opsByCommand[command] = [];
     }
-    this.opsByCommand[command].push(operation);
+    this.opsByCommand[command].push(info);
   }
   *_call(goal: ArrayView) {
     const commandName = _getCommandName(goal);
     const opsForCommand = this.opsByCommand[commandName];
     if (opsForCommand) {
-      for (const scope of MatchMap.alloc().autoDrop()) {
-        for (const [llOp, llAction] of opsForCommand) {
+      {
+        const scope = new MatchFixedArray();
+        for (const opInfo of opsForCommand) {
+          scope.setInfo(opInfo);
+          const { statement: llOp, action: llAction } = opInfo;
           const llOpView = ViewFactory.array(scope, llOp, 0);
           for (const _ of llOpView.unify(goal)) {
             yield* llAction(llOpView, this.system);
@@ -1162,6 +1326,9 @@ class SystemOps implements UnifyOps {
 export class System {
   ops: SystemOps = new SystemOps(this);
   facts: Facts = new Facts(this);
+  mixin(mixin: (system: System) => System) {
+    return mixin(this);
+  }
   *call(goal: Stmt) {
     const context = new MatchMap();
     for (const _ of this._call(ViewFactory.array(context, goal, 0))) {
@@ -1178,12 +1345,14 @@ export class System {
       return;
     }
 
-    for (const scope of MatchMap.alloc().autoDrop()) {
+    {
       try {
         const factName = _getCommandName(goal);
         const factsForCommand = this.facts.factsByCommand[factName];
         if (factsForCommand) {
+          const scope = new MatchFixedArray();
           for (const fact of factsForCommand) {
+            scope.setInfo(fact);
             const factGoal = ViewFactory.array(scope, fact.statement, 0);
             for (const _ of factGoal.unify(goal)) {
               const factCondition = ViewFactory.array(scope, fact.condition, 0);
@@ -1206,213 +1375,3 @@ export const _call = defaultSystem._call.bind(defaultSystem);
 export const call = _call;
 
 const viewOf = ViewFactory.view;
-
-{
-  const [_0, _1, _2, _3, _4] = args();
-  // const m = new MatchMap();
-  // const n = new MatchMap();
-  // for (const _ of _unify(viewOf(m, [1, _0]), viewOf(n, [_1, _1, ..._2]))) {
-  //   console.log(
-  //     serialize(viewOf(m, [_0, _1, _2])),
-  //     serialize(viewOf(n, [_0, _1, _2]))
-  //   );
-  // }
-  // for (const _ of _unify(viewOf(m, { a: _0 }), viewOf(n, { a: 1 }))) {
-  //   console.log(
-  //     serialize(viewOf(m, [_0, _1, _2])),
-  //     serialize(viewOf(n, [_0, _1, _2]))
-  //   );
-  // }
-  // // for (const _ of _unify(viewOf(m, { ..._0 }), viewOf(n, { a: 1 }))) {
-  // //   console.log(
-  // //     serialize(viewOf(m, [_0, _1, _2])),
-  // //     serialize(viewOf(n, [_0, _1, _2]))
-  // //   );
-  // // }
-  // // for (const _ of _unify(
-  // //   viewOf(m, { a: 1, c: 3, ..._0 }),
-  // //   viewOf(n, { b: 2, ..._1 })
-  // // )) {
-  // //   console.log(
-  // //     serialize(viewOf(m, [_0, _1, _2])),
-  // //     serialize(viewOf(n, [_0, _1, _2]))
-  // //   );
-  // // }
-  // // for (const _ of _unify(
-  // //   viewOf(m, [{ a: 1, c: 3, ..._0 }, _0]),
-  // //   viewOf(n, [
-  // //     { b: 2, ..._1 },
-  // //     { d: 4, e: 5, ..._2 },
-  // //   ])
-  // // )) {
-  // //   console.log(
-  // //     serialize(viewOf(m, [_0, _1, _2])),
-  // //     serialize(viewOf(n, [_0, _1, _2]))
-  // //   );
-  // // }
-  // for (const _ of _call(
-  //   viewOf(m, [",", ["value", _0, ..._1], ["log", _0, _1]]),
-  //   new Facts().add(["value", 1]).add(["value", 2])
-  // )) {
-  // }
-  // const start = process.hrtime.bigint
-  //   ? process.hrtime.bigint()
-  //   : process.hrtime();
-  // // const startMs = Date.now();
-  // for (const _ of _call(
-  //   viewOf(m, [
-  //     ",",
-  //     [
-  //       "get",
-  //       [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20],
-  //       ..._0,
-  //     ],
-  //     ["true"],
-  //   ]),
-  //   new Facts().add(
-  //     ["get", [_0, ..._1], _2, _3],
-  //     [
-  //       ";",
-  //       [",", ["is", _2, 0], ["=", _3, _0]],
-  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-  //     ]
-  //   )
-  // )) {
-  // }
-  // console.log(
-  //   ((process.hrtime.bigint
-  //     ? process.hrtime.bigint()
-  //     : process.hrtime()) as any) - (start as any)
-  //   // Date.now() - startMs
-  // );
-  // for (const _ of new Facts()
-  //   .add(
-  //     ["get", [_0, ..._1], _2, _3],
-  //     [
-  //       ";",
-  //       [",", ["is", _2, 0], ["=", _3, _0]],
-  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-  //     ]
-  //   )
-  //   .call([",", ["get", [1, 2, 3, 4], ..._0], ["log", _0]])) {
-  // }
-  // for (const _ of new Facts()
-  //   .add(
-  //     ["get", [_0, ..._1], _2, _3],
-  //     [
-  //       ";",
-  //       [",", ["is", _2, 0], ["=", _3, _0]],
-  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-  //     ]
-  //   )
-  //   .call([",", ["get", [1, 2, 3, 4], _0, 2], ["log", _0]])) {
-  // }
-  // for (const _ of new Facts()
-  //   .add(
-  //     ["get", [_0, ..._1], _2, _3],
-  //     [
-  //       ";",
-  //       [",", ["is", _2, 0], ["=", _3, _0]],
-  //       [",", ["get", _1, _4, _3], ["is", _2, ["+", _4, 1]]],
-  //     ]
-  //   )
-  //   .call([",", ["get", [1, 2, 3, 4], 2, _0], ["log", _0]])) {
-  // }
-  const start2 = process.hrtime.bigint();
-  const a = () => new Arg();
-  const [houses, drinksWater, zebraOwner, _5, _6, _7, _8, _9] = args(
-    "houses",
-    "drinksWater",
-    "zebraOwner"
-  );
-  for (const _ of new System().facts
-    .add(["house", _0, [_0, _1, _2, _3, _4]])
-    .add(["house", _0, [_1, _0, _2, _3, _4]])
-    .add(["house", _0, [_1, _2, _0, _3, _4]])
-    .add(["house", _0, [_1, _2, _3, _0, _4]])
-    .add(["house", _0, [_1, _2, _3, _4, _0]])
-    .add(["leftOf", _0, _1, [_0, _1, _2, _3, _4]])
-    .add(["leftOf", _0, _1, [_2, _0, _1, _3, _4]])
-    .add(["leftOf", _0, _1, [_2, _3, _0, _1, _4]])
-    .add(["leftOf", _0, _1, [_2, _3, _4, _0, _1]])
-    .add(["rightOf", _0, _1, [_1, _0, _2, _3, _4]])
-    .add(["rightOf", _0, _1, [_2, _1, _0, _3, _4]])
-    .add(["rightOf", _0, _1, [_2, _3, _1, _0, _4]])
-    .add(["rightOf", _0, _1, [_2, _3, _4, _1, _0]])
-    .add(["first", _0, [_0, _1, _2, _3, _4]])
-    .add(["middle", _0, [_1, _2, _0, _3, _4]])
-    .add(["nextTo", _0, _1, _2], ["leftOf", _0, _1, _2])
-    .add(["nextTo", _0, _1, _2], ["rightOf", _0, _1, _2])
-    .add(
-      ["problem", houses],
-      [
-        ",",
-        ["house", ["brit", a(), a(), "red", a()], houses],
-        // ["log", houses],
-        ["house", ["spaniard", "dog", a(), a(), a()], houses],
-        // ["log", houses],
-        ["house", [a(), a(), "coffee", "green", a()], houses],
-        // ["log", houses],
-        ["house", ["ukrainian", a(), "tea", a(), a()], houses],
-        // ["log", houses],
-        [
-          "rightOf",
-          [a(), a(), a(), "green", a()],
-          [a(), a(), a(), "ivory", a()],
-          houses,
-        ],
-        // ["log", houses],
-        ["house", [a(), "snails", a(), a(), "oatmeal"], houses],
-        // ["log", houses],
-        ["house", [a(), a(), a(), "yellow", "chocolate chip"], houses],
-        // ["log", houses],
-        ["middle", [a(), a(), "milk", a(), a()], houses],
-        ["first", ["norwegian", a(), a(), a(), a()], houses],
-        [
-          "nextTo",
-          [a(), a(), a(), a(), "sugar"],
-          [a(), "fox", a(), a(), a()],
-          houses,
-        ],
-        [
-          "nextTo",
-          [a(), a(), a(), a(), "chocolate chip"],
-          [a(), "horse", a(), a(), a()],
-          houses,
-        ],
-        ["house", [a(), a(), "orange juice", a(), "peanut"], houses],
-        ["house", ["japanese", a(), a(), a(), "frosted"], houses],
-        [
-          "nextTo",
-          ["norwegian", a(), a(), a(), a()],
-          [a(), a(), a(), "blue", a()],
-          houses,
-        ],
-      ]
-    )
-    .call([
-      ",",
-      ["problem", houses],
-      ["house", [zebraOwner, "zebra", a(), a(), a()], houses],
-      ["house", [drinksWater, a(), "water", a(), a()], houses],
-      ["log", zebraOwner, drinksWater],
-    ])) {
-    console.log(process.hrtime.bigint() - start2);
-    console.log(_.serialize());
-    break;
-  }
-  console.log(
-    autoDropPool.allocs,
-    autoDropPool.freeList.length,
-    matchPool.allocs,
-    matchPool.freeList.length,
-    argViewPool.allocs,
-    argViewPool.freeList.length,
-    arrayViewPool.allocs,
-    arrayViewPool.freeList.length,
-    indexArrayViewPool.allocs,
-    indexArrayViewPool.freeList.length,
-    emptyArrayViewPool.allocs,
-    emptyArrayViewPool.freeList.length
-  );
-}
