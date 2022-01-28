@@ -1,5 +1,3 @@
-import { build } from "esbuild";
-
 export type Immutable =
   | undefined
   | null
@@ -27,7 +25,11 @@ const objectRestKey = "__UNIFY_VIEW__OBJECT_REST_KEY";
 const objectRestKeySymbol = Symbol.for(objectRestKey);
 
 export class Arg {
-  constructor(private _id?: number, private _debugId?: any) {}
+  constructor(private _id?: number, private _debugId?: any) {
+    Object.defineProperty(this, "_id", { enumerable: false });
+    Object.defineProperty(this, "_debugId", { enumerable: false });
+    this[objectRestKeySymbol] = this;
+  }
 
   get id() {
     return this._id;
@@ -536,8 +538,7 @@ export class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
   constructor(
     public context: MatchSet,
     public target: T,
-    public start: number,
-    public pool?: Pool<ArrayView>
+    public start: number
   ) {
     super();
   }
@@ -554,9 +555,9 @@ export class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
   }
   serialize(cycleMap: Map<View, any> = new Map()) {
     if (!cycleMap.has(this)) {
-      if (this.target.length === this.start) {
+      if (this.empty() && !this.more()) {
         cycleMap.set(this, []);
-      } else if (this.target[this.start] instanceof RestArg) {
+      } else if (this.empty() && this.more()) {
         cycleMap.set(this, this.rest().serialize(cycleMap));
       } else {
         const value = [];
@@ -624,7 +625,7 @@ export class ArrayView<T extends ArrayExpr = ArrayExpr> extends View {
   ) {
     return (
       ArrayView.init(pool.alloc(), context, target, index) ||
-      new ArrayView(context, target, index, pool)
+      new ArrayView(context, target, index)
     );
   }
   static init<T extends ArrayExpr>(
@@ -680,7 +681,7 @@ export class IndexArrayView<
     if (pool.freeList.length > 0) {
       return IndexArrayView.init(pool.alloc(), context, target, start);
     }
-    return new IndexArrayView(context, target, start, pool);
+    return new IndexArrayView(context, target, start);
   }
   static init<T extends ArrayExpr>(
     view: IndexArrayView<T>,
@@ -730,7 +731,7 @@ export class EmptyArrayView<
   ) {
     return (
       EmptyArrayView.init(pool.alloc(), context, target, start) ||
-      new EmptyArrayView(context, target, start, pool)
+      new EmptyArrayView(context, target, start)
     );
   }
   static init<T extends ArrayExpr>(
@@ -754,11 +755,13 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
     public target: V,
     public entries = ViewFactory.array(
       context,
-      Object.entries(target).sort(([aKey], [bKey]) =>
-        aKey.localeCompare(bKey)
-      ) as [string, Expr][],
+      [
+        ...Object.entries(target).sort(([aKey], [bKey]) =>
+          aKey.localeCompare(bKey)
+        ),
+      ] as ([string, Expr] | RestArg)[],
       0
-    )
+    ) as ArrayView
   ) {
     super();
   }
@@ -769,7 +772,11 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
     return (
       other.isObject() &&
       other.context === this.context &&
-      other.target === this.target
+      other.target === this.target &&
+      ((this.empty() && other.empty() && (!this.more() || !other.more())) ||
+        (!this.empty() &&
+          !other.empty() &&
+          this.firstKey() === other.firstKey()))
     );
   }
   serialize(cycleMap: Map<View, any> = new Map()) {
@@ -798,7 +805,7 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
   *unify(other: View) {
     if (other.isArg()) {
       yield* other.unify(this);
-    } else if (this.isSame(other)) {
+    } else if (this.isSame(other) && other.isSame(this)) {
       yield true;
     } else if (other.isObject()) {
       if (!this.empty() && !other.empty()) {
@@ -808,7 +815,21 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
           for (const _ of this.firstValue().unify(other.firstValue())) {
             yield* this.rest().unify(other.rest());
           }
+        } else if (thisKey < otherKey && other.more()) {
+          for (const _ of this.firstEntry().unify(other.next())) {
+            yield* this.rest().unify(other);
+          }
+        } else if (thisKey > otherKey && this.more()) {
+          for (const _ of this.next().unify(other.firstEntry())) {
+            yield* this.unify(other.rest());
+          }
         }
+      } else if (other.empty() && other.more()) {
+        yield* this.unify(other.rest());
+      } else if (other instanceof ObjectRestView) {
+        yield* other.argView.unify(this);
+      } else if (this.empty() && this.more()) {
+        yield* this.rest().unify(other);
       } else if (this.empty() && other.empty()) {
         yield true;
       }
@@ -818,18 +839,175 @@ export class ObjectView<V extends ObjectExpr = ObjectExpr> extends View {
     return this.entries.target.length === this.entries.start;
   }
   more() {
-    return false;
+    return this.target[objectRestKeySymbol] instanceof Arg;
+  }
+  first(): ArrayView<[string, Expr]> {
+    return this.entries.first() as ArrayView<[string, Expr]>;
+  }
+  firstEntry() {
+    return new ObjectEntryView(
+      this.context,
+      this.target,
+      this.firstKey(),
+      this.firstValue(),
+      new ObjectRestView(
+        this.context,
+        this.target,
+        new StandaloneArgView(new Arg())
+      )
+    );
   }
   firstKey(): string {
-    return (
-      (this.entries.first() as ArrayView).first() as ImmutableView<string>
-    ).value;
+    return this.first().first().serialize();
   }
   firstValue() {
-    return (this.entries.first() as ArrayView<[string, Expr]>).rest().first();
+    return this.first().rest().first();
   }
   rest() {
+    if (this.empty() && this.more()) {
+      return this.next();
+    }
     return new ObjectView(this.context, this.target, this.entries.rest());
+  }
+  next(): ObjectView {
+    return new ObjectRestView(
+      this.context,
+      this.target,
+      ViewFactory.arg(this.context, this.target[objectRestKeySymbol]) as ArgView
+    );
+  }
+}
+
+export class StandaloneArgView extends ArgView {
+  value: View;
+  constructor(public arg: Arg) {
+    super(null, arg);
+  }
+  bound() {
+    return this.value !== undefined;
+  }
+  isSame(other: View) {
+    return this === other;
+  }
+  get() {
+    if (this.bound()) {
+      return this.value;
+    }
+    return this;
+  }
+  set(value: View) {
+    this.value = value;
+  }
+  delete() {
+    this.value = undefined;
+  }
+}
+
+export class ObjectEntryView<T extends ObjectExpr> extends ObjectView<T> {
+  constructor(
+    context: MatchSet,
+    target: T,
+    public key: string,
+    public value: Expr | View,
+    public nextView: ObjectView
+  ) {
+    super(context, target, undefined);
+  }
+  isSame(other: View) {
+    return (
+      other.isObject() &&
+      this.context === other.context &&
+      this.target === other.target &&
+      !other.empty() &&
+      this.key === other.firstKey()
+    );
+  }
+  empty() {
+    return false;
+  }
+  more() {
+    return this.nextView !== undefined;
+  }
+  firstEntry() {
+    return this;
+  }
+  firstKey() {
+    return this.key;
+  }
+  firstValue() {
+    return ViewFactory.view(this.context, this.value);
+  }
+  rest(): ObjectView<any> {
+    if (this.more()) {
+      return this.next();
+    }
+    return EMPTY_OBJECT_VIEW as ObjectView<any>;
+  }
+  next() {
+    return this.nextView;
+  }
+  *unify(other: View) {
+    if (other.isArg()) {
+      yield* other.unify(this);
+    } else if (this.isSame(other)) {
+      yield true;
+    } else if (other.isObject()) {
+      if (!other.empty()) {
+        const thisKey = this.firstKey();
+        const otherKey = other.firstKey();
+        if (thisKey === otherKey) {
+          for (const _ of this.firstValue().unify(other.firstValue())) {
+            yield* this.rest().unify(other.rest());
+          }
+        } else if (thisKey < otherKey && other.more()) {
+          yield* this.unify(other.next());
+        } else if (thisKey > otherKey && this.more()) {
+          yield* this.next().unify(other);
+        }
+      } else if (other.more()) {
+        yield* this.unify(other.next());
+      } else if (other instanceof ObjectRestView) {
+        yield* other.argView.unify(this);
+      }
+    }
+  }
+}
+
+export class ObjectRestView<T extends ObjectExpr> extends ObjectView<T> {
+  constructor(context: MatchSet, target: T, public argView: View) {
+    super(context, target, null);
+  }
+  empty() {
+    return true;
+  }
+  more() {
+    return this.argView.isArg()
+      ? this.argView.get().isObject()
+      : this.argView.isObject();
+  }
+  next() {
+    return (
+      this.argView.isArg() ? this.argView.get() : this.argView
+    ) as ObjectView;
+  }
+  *unify(other: View) {
+    if (other.isArg()) {
+      yield* other.unify(this);
+    } else if (this.isSame(other)) {
+      yield true;
+    } else if (other.isObject()) {
+      if (this.more()) {
+        yield* this.argView.unify(other);
+      } else if (other instanceof ObjectEntryView) {
+        yield* this.argView.unify(other);
+      } else if (other.empty() && !other.more()) {
+        yield* this.argView.unify(other);
+      } else if (!other.empty()) {
+        for (const _ of this.argView.unify(other.firstEntry())) {
+          yield* this.next().next().unify(other.rest());
+        }
+      }
+    }
   }
 }
 
@@ -901,9 +1079,7 @@ export function* take(iter: Iterable<any>, count: number) {
 }
 
 const [params, more] = replaceArgs(Array.from(take(args(), 2)), []);
-console.log(params, more);
 const [left, right] = replaceArgs(Array.from(take(args(), 2)), []);
-console.log(left, right);
 const [left2, right2] = args();
 const [templateArg, goalArg, bagArg] = replaceArgs(
   Array.from(take(args(), 4)),
